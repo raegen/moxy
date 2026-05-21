@@ -1,0 +1,25 @@
+{
+  "name": "moxy",
+  "version": "0.1.0",
+  "description": "Chrome extension for full response mocking — including status codes.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:patch": "esbuild src/inject/patch.ts --bundle --format=iife --target=es2022 --outfile=dist/patch.js --legal-comments=none",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mswjs/interceptors": "^0.41.9",
+    "preact": "^10.22.0"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0-beta.25",
+    "@preact/preset-vite": "^2.9.0",
+    "@types/chrome": "^0.0.268",
+    "typescript": "^5.5.3",
+    "vite": "^5.3.4"
+  }
+}
