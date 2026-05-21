@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useMemo } from 'preact/hooks';
 import type { Capture, Rule, SwResponse } from '../shared/types';
 import { MutateDrawer } from './MutateDrawer';
+import { useTabId } from './TabContext';
 
 async function send<T = unknown>(msg: unknown): Promise<T | null> {
   try {
@@ -31,7 +32,7 @@ function statusColor(status: number): string {
 type Tab = 'captures' | 'rules';
 
 export function App() {
-  const [tabId, setTabId] = useState<number | null>(null);
+  const tabId = useTabId();
   const [captures, setCaptures] = useState<Capture[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
   const [globalEnabled, setGlobalEnabled] = useState<boolean>(true);
@@ -51,20 +52,19 @@ export function App() {
     if (ge != null) setGlobalEnabled(ge);
   }, []);
 
+  // Re-fetch whenever the host changes the current tab. The side-panel host
+  // updates on chrome.tabs.onActivated; the DevTools host (v1.1b) holds a
+  // fixed tabId for the session, so this fires once at mount and stays.
   useEffect(() => {
-    chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => {
-      if (tab?.id) {
-        setTabId(tab.id);
-        void refresh(tab.id);
-      }
-    });
-  }, [refresh]);
+    void refresh(tabId);
+  }, [tabId, refresh]);
 
   useEffect(() => {
     const listener = (msg: {
       kind?: string;
       capture?: Capture;
       tabId?: number;
+      enabled?: boolean;
     }) => {
       if (!msg?.kind) return;
       if (msg.kind === 'panel:capture-added') {
@@ -79,22 +79,12 @@ export function App() {
       } else if (msg.kind === 'panel:rules-updated') {
         void refresh(tabId);
       } else if (msg.kind === 'panel:global-toggled') {
-        const m = msg as { kind: string; enabled?: boolean };
-        if (typeof m.enabled === 'boolean') setGlobalEnabled(m.enabled);
+        if (typeof msg.enabled === 'boolean') setGlobalEnabled(msg.enabled);
       }
     };
     chrome.runtime.onMessage.addListener(listener);
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, [tabId, refresh]);
-
-  useEffect(() => {
-    const onActivated = ({ tabId: newTab }: chrome.tabs.TabActiveInfo) => {
-      setTabId(newTab);
-      void refresh(newTab);
-    };
-    chrome.tabs.onActivated.addListener(onActivated);
-    return () => chrome.tabs.onActivated.removeListener(onActivated);
-  }, [refresh]);
 
   const clear = async () => {
     if (tabId == null) return;
