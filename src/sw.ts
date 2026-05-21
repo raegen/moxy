@@ -1,17 +1,41 @@
-// moxy service worker — rule storage, capture buffer, tab lifecycle, broadcasts.
+// moxy service worker — rule storage, capture buffer, scenarios, broadcasts.
+//
+// Boot order matters: migration runs first (reads moxy:formatVersion flag),
+// then patch.js registration, then existing-tab injection (the v1.0.1 cold-
+// start fix). All storage writes go through withWriteLock to serialize
+// concurrent saves across the side panel + DevTools panel + capture stream.
 
-import type { Capture, Rule, SwMessage, SwResponse } from './shared/types';
+import type { Capture, Scenario, SwMessage, SwResponse } from './shared/types';
+import { migrateV1ToV11, chromeStorageAdapter } from './shared/migrate';
+import { withWriteLock } from './shared/storage';
+import {
+  STORAGE_KEY_SCENARIOS,
+  STORAGE_KEY_ACTIVE,
+  listScenarios,
+  getScenario,
+  saveScenario,
+  deleteScenario as deleteScenarioFromStore,
+  uniqueNameFor,
+  getActiveScenarioIdForTab,
+  setActiveScenarioForTab,
+  clearTabFromActive,
+  clearAllActive,
+  getRulesForTab,
+  saveRuleInActiveScenario,
+  deleteRuleInActiveScenario,
+  toggleRuleInActiveScenario,
+  gcEphemeralScenarios,
+} from './shared/scenario-store';
 
 const PATCH_SCRIPT_ID = 'moxy-patch';
-const STORAGE_KEY_RULES = 'moxy:rules';
 const STORAGE_KEY_CAPTURES = 'moxy:captures';
 const STORAGE_KEY_GLOBAL_ENABLED = 'moxy:enabled';
 const CAPTURE_BUFFER_LIMIT_PER_TAB = 500;
 
-// Serialize all callers within a single SW lifetime. The three triggers
-// (onInstalled, onStartup, top-level wake) can fire near-simultaneously and
-// race past the existence check; a singleton promise collapses them into one
-// attempt.
+const storageAdapter = chromeStorageAdapter();
+
+// ---------- registration ----------
+
 let registerPromise: Promise<void> | null = null;
 
 function registerPatchScript(): Promise<void> {
@@ -38,7 +62,6 @@ function registerPatchScript(): Promise<void> {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes('Duplicate script ID')) {
-        // Cross-SW-lifetime race or stale registration; harmless.
         console.log('[moxy] patch script already registered');
         return;
       }
@@ -49,28 +72,16 @@ function registerPatchScript(): Promise<void> {
   return registerPromise;
 }
 
-// Cold-start fix (v1.0.1). chrome.scripting.registerContentScripts only fires
-// on new page loads — tabs already open when the extension installs or reloads
-// would otherwise need a manual reload before patch.js + bridge re-inject. This
-// iterates every eligible http(s) tab and force-injects via executeScript.
-// Idempotent: __moxy_installed / __moxy_bridge_installed guards make re-inject
-// a no-op when already installed.
 async function injectIntoExistingTabs(): Promise<void> {
   const tabs = await chrome.tabs.query({});
   const manifest = chrome.runtime.getManifest();
-  // Bridge files are declared in manifest.content_scripts. CRXJS bundles them
-  // to hashed filenames; reading at runtime avoids hardcoding the hash.
   const bridgeFiles =
     manifest.content_scripts?.flatMap((cs) => cs.js ?? []) ?? [];
 
   await Promise.all(
     tabs.map(async (tab) => {
       if (!tab.id || !tab.url) return;
-      if (!/^https?:/i.test(tab.url)) return; // skip chrome://, file://, edge cases
-
-      // Incognito: chrome.extension.isAllowedIncognitoAccess() reflects the
-      // user-level "Allow in incognito" toggle. inIncognitoContext only tells
-      // us about the SW's own context, which is the wrong question.
+      if (!/^https?:/i.test(tab.url)) return;
       if (tab.incognito) {
         try {
           const allowed = await chrome.extension.isAllowedIncognitoAccess();
@@ -79,9 +90,6 @@ async function injectIntoExistingTabs(): Promise<void> {
           return;
         }
       }
-
-      // MAIN-world patch. injectImmediately: page is already past
-      // document_start, so inject ASAP.
       try {
         await chrome.scripting.executeScript({
           target: { tabId: tab.id },
@@ -90,11 +98,8 @@ async function injectIntoExistingTabs(): Promise<void> {
           injectImmediately: true,
         });
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.warn(`[moxy] patch inject failed for ${tab.url} — ${msg}`);
+        console.warn(`[moxy] patch inject failed for ${tab.url} — ${e instanceof Error ? e.message : String(e)}`);
       }
-
-      // ISOLATED-world bridge.
       if (bridgeFiles.length > 0) {
         try {
           await chrome.scripting.executeScript({
@@ -102,49 +107,55 @@ async function injectIntoExistingTabs(): Promise<void> {
             files: bridgeFiles,
           });
         } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          console.warn(`[moxy] bridge inject failed for ${tab.url} — ${msg}`);
+          console.warn(`[moxy] bridge inject failed for ${tab.url} — ${e instanceof Error ? e.message : String(e)}`);
         }
       }
     })
   );
 }
 
-// Run after patch script registration. onInstalled fires on fresh install and
-// on every extension reload during dev — both code paths benefit.
+// Migration runs through the same write lock as everything else writing to
+// scenarios / active, so concurrent message handlers can't interleave with it.
+async function runMigration(): Promise<void> {
+  const tabs = await chrome.tabs.query({});
+  const openTabIds = tabs.map((t) => t.id).filter((id): id is number => typeof id === 'number');
+  await withWriteLock('moxy:migration', async () => {
+    const result = await migrateV1ToV11(storageAdapter, openTabIds);
+    if (result.ran && result.reason === 'completed') {
+      console.log('[moxy] migration: v1 rules wrapped into scenario', result.scenarioCreated?.id);
+    }
+    for (const w of result.warnings) console.warn('[moxy] migration:', w);
+  });
+}
+
 async function bootSequence(): Promise<void> {
+  await runMigration();
   await registerPatchScript();
   await injectIntoExistingTabs();
 }
 
 chrome.runtime.onInstalled.addListener(() => void bootSequence());
-chrome.runtime.onStartup.addListener(() => void bootSequence());
+chrome.runtime.onStartup.addListener(async () => {
+  // Tab IDs recycle across browser restarts. Auto-attaching a scenario to
+  // whatever inherits a recycled tabId would be surprising — clear active
+  // state and let users reload scenarios explicitly. Also GC any ephemeral
+  // "Untitled (DevTools)" scenarios left over from last session.
+  await withWriteLock(STORAGE_KEY_ACTIVE, async () => {
+    await clearAllActive(storageAdapter);
+  });
+  await withWriteLock(STORAGE_KEY_SCENARIOS, async () => {
+    const removed = await gcEphemeralScenarios(storageAdapter);
+    if (removed > 0) console.log(`[moxy] gc'd ${removed} ephemeral scenarios from prior session`);
+  });
+  await bootSequence();
+});
 void bootSequence();
 
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch((e) => console.error('[moxy] sidePanel behavior', e));
 
-// ---------- storage helpers ----------
-
-async function loadRules(): Promise<Rule[]> {
-  const obj = await chrome.storage.local.get(STORAGE_KEY_RULES);
-  return (obj[STORAGE_KEY_RULES] as Rule[] | undefined) ?? [];
-}
-
-async function loadGlobalEnabled(): Promise<boolean> {
-  const obj = await chrome.storage.local.get(STORAGE_KEY_GLOBAL_ENABLED);
-  const v = obj[STORAGE_KEY_GLOBAL_ENABLED] as boolean | undefined;
-  return v ?? true;
-}
-
-async function saveGlobalEnabled(enabled: boolean): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEY_GLOBAL_ENABLED]: enabled });
-}
-
-async function saveRules(rules: Rule[]): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEY_RULES]: rules });
-}
+// ---------- captures + global toggle ----------
 
 async function loadCaptures(): Promise<Capture[]> {
   const obj = await chrome.storage.local.get(STORAGE_KEY_CAPTURES);
@@ -155,32 +166,39 @@ async function saveCaptures(captures: Capture[]): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEY_CAPTURES]: captures });
 }
 
-async function appendCapture(cap: Capture): Promise<void> {
-  const all = await loadCaptures();
-  all.push(cap);
+async function loadGlobalEnabled(): Promise<boolean> {
+  const obj = await chrome.storage.local.get(STORAGE_KEY_GLOBAL_ENABLED);
+  return (obj[STORAGE_KEY_GLOBAL_ENABLED] as boolean | undefined) ?? true;
+}
 
-  // Rolling buffer per tab.
-  const byTab = new Map<number, Capture[]>();
-  for (const c of all) {
-    const arr = byTab.get(c.tabId) ?? [];
-    arr.push(c);
-    byTab.set(c.tabId, arr);
-  }
-  const trimmed: Capture[] = [];
-  for (const arr of byTab.values()) {
-    const start = Math.max(0, arr.length - CAPTURE_BUFFER_LIMIT_PER_TAB);
-    for (let i = start; i < arr.length; i++) trimmed.push(arr[i]);
-  }
-  trimmed.sort((a, b) => a.ts - b.ts);
-  await saveCaptures(trimmed);
+async function saveGlobalEnabled(enabled: boolean): Promise<void> {
+  await chrome.storage.local.set({ [STORAGE_KEY_GLOBAL_ENABLED]: enabled });
+}
+
+async function appendCapture(cap: Capture): Promise<void> {
+  await withWriteLock(STORAGE_KEY_CAPTURES, async () => {
+    const all = await loadCaptures();
+    all.push(cap);
+    const byTab = new Map<number, Capture[]>();
+    for (const c of all) {
+      const arr = byTab.get(c.tabId) ?? [];
+      arr.push(c);
+      byTab.set(c.tabId, arr);
+    }
+    const trimmed: Capture[] = [];
+    for (const arr of byTab.values()) {
+      const start = Math.max(0, arr.length - CAPTURE_BUFFER_LIMIT_PER_TAB);
+      for (let i = start; i < arr.length; i++) trimmed.push(arr[i]);
+    }
+    trimmed.sort((a, b) => a.ts - b.ts);
+    await saveCaptures(trimmed);
+  });
   notifyPanel({ kind: 'panel:capture-added', capture: cap });
 }
 
 // ---------- broadcasts ----------
 
 function notifyPanel(msg: unknown): void {
-  // Side panel listens via chrome.runtime.onMessage. If no listener, sendMessage
-  // rejects — swallow.
   chrome.runtime.sendMessage(msg).catch(() => {});
 }
 
@@ -188,7 +206,7 @@ async function broadcastRulesToTab(tabId: number): Promise<void> {
   try {
     await chrome.tabs.sendMessage(tabId, { kind: 'broadcast:rules-updated' });
   } catch {
-    // Tab has no bridge yet (e.g. chrome://, devtools). Ignore.
+    /* tab has no bridge yet */
   }
 }
 
@@ -200,25 +218,23 @@ async function broadcastRulesToAllTabs(): Promise<void> {
 // ---------- tab lifecycle ----------
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  const rules = await loadRules();
-  const remaining = rules.filter((r) => r.tabId !== tabId);
-  if (remaining.length !== rules.length) {
-    await saveRules(remaining);
-  }
-  const caps = await loadCaptures();
-  const remainingCaps = caps.filter((c) => c.tabId !== tabId);
-  if (remainingCaps.length !== caps.length) {
-    await saveCaptures(remainingCaps);
-  }
+  await withWriteLock(STORAGE_KEY_ACTIVE, async () => {
+    await clearTabFromActive(storageAdapter, tabId);
+  });
+  await withWriteLock(STORAGE_KEY_CAPTURES, async () => {
+    const caps = await loadCaptures();
+    const remaining = caps.filter((c) => c.tabId !== tabId);
+    if (remaining.length !== caps.length) await saveCaptures(remaining);
+  });
   notifyPanel({ kind: 'panel:tab-closed', tabId });
 });
 
 // ---------- message router ----------
 
 chrome.runtime.onMessage.addListener((msg: SwMessage & { kind: string }, sender, sendResponse) => {
-  void handleMessage(msg, sender).then(sendResponse).catch((e) => {
-    sendResponse({ ok: false, error: String(e) } satisfies SwResponse);
-  });
+  void handleMessage(msg, sender)
+    .then(sendResponse)
+    .catch((e) => sendResponse({ ok: false, error: String(e) } satisfies SwResponse));
   return true; // async response
 });
 
@@ -229,24 +245,7 @@ async function handleMessage(
   const senderTabId = sender.tab?.id;
 
   switch (msg.kind) {
-    case 'sw:get-rules-for-tab': {
-      if (senderTabId == null) return { ok: true, data: [] };
-      const enabled = await loadGlobalEnabled();
-      if (!enabled) return { ok: true, data: [] };
-      const all = await loadRules();
-      const forTab = all.filter((r) => r.tabId === senderTabId);
-      return { ok: true, data: forTab };
-    }
-    case 'sw:get-global-enabled': {
-      const enabled = await loadGlobalEnabled();
-      return { ok: true, data: enabled };
-    }
-    case 'sw:set-global-enabled': {
-      await saveGlobalEnabled(msg.enabled);
-      await broadcastRulesToAllTabs();
-      notifyPanel({ kind: 'panel:global-toggled', enabled: msg.enabled });
-      return { ok: true };
-    }
+    // ---- captures / global ----
     case 'sw:capture': {
       if (senderTabId == null) return { ok: false, error: 'no tab id on sender' };
       const cap: Capture = { ...msg.capture, tabId: senderTabId };
@@ -258,47 +257,178 @@ async function handleMessage(
       const filtered = msg.tabId != null ? all.filter((c) => c.tabId === msg.tabId) : all;
       return { ok: true, data: filtered };
     }
-    case 'sw:list-rules': {
-      const all = await loadRules();
-      const filtered = msg.tabId != null ? all.filter((r) => r.tabId === msg.tabId) : all;
-      return { ok: true, data: filtered };
-    }
-    case 'sw:save-rule': {
-      const all = await loadRules();
-      const idx = all.findIndex((r) => r.id === msg.rule.id);
-      if (idx >= 0) all[idx] = msg.rule;
-      else all.push(msg.rule);
-      await saveRules(all);
-      await broadcastRulesToTab(msg.rule.tabId);
-      notifyPanel({ kind: 'panel:rules-updated' });
-      return { ok: true };
-    }
-    case 'sw:delete-rule': {
-      const all = await loadRules();
-      const target = all.find((r) => r.id === msg.ruleId);
-      const remaining = all.filter((r) => r.id !== msg.ruleId);
-      await saveRules(remaining);
-      if (target) await broadcastRulesToTab(target.tabId);
-      notifyPanel({ kind: 'panel:rules-updated' });
-      return { ok: true };
-    }
-    case 'sw:toggle-rule': {
-      const all = await loadRules();
-      const idx = all.findIndex((r) => r.id === msg.ruleId);
-      if (idx < 0) return { ok: false, error: 'rule not found' };
-      all[idx] = { ...all[idx], enabled: msg.enabled };
-      await saveRules(all);
-      await broadcastRulesToTab(all[idx].tabId);
-      notifyPanel({ kind: 'panel:rules-updated' });
-      return { ok: true };
-    }
     case 'sw:clear-captures': {
-      const all = await loadCaptures();
-      const remaining = msg.tabId != null ? all.filter((c) => c.tabId !== msg.tabId) : [];
-      await saveCaptures(remaining);
+      await withWriteLock(STORAGE_KEY_CAPTURES, async () => {
+        const all = await loadCaptures();
+        const remaining = msg.tabId != null ? all.filter((c) => c.tabId !== msg.tabId) : [];
+        await saveCaptures(remaining);
+      });
       notifyPanel({ kind: 'panel:captures-cleared', tabId: msg.tabId });
       return { ok: true };
     }
+    case 'sw:get-global-enabled': {
+      return { ok: true, data: await loadGlobalEnabled() };
+    }
+    case 'sw:set-global-enabled': {
+      await withWriteLock(STORAGE_KEY_GLOBAL_ENABLED, async () => {
+        await saveGlobalEnabled(msg.enabled);
+      });
+      await broadcastRulesToAllTabs();
+      notifyPanel({ kind: 'panel:global-toggled', enabled: msg.enabled });
+      return { ok: true };
+    }
+
+    // ---- rules (via active scenario) ----
+    case 'sw:get-rules-for-tab': {
+      if (senderTabId == null) return { ok: true, data: [] };
+      const enabled = await loadGlobalEnabled();
+      if (!enabled) return { ok: true, data: [] };
+      const rules = await getRulesForTab(storageAdapter, senderTabId);
+      return { ok: true, data: rules };
+    }
+    case 'sw:list-rules': {
+      // Panel-facing version. msg.tabId is the panel's "current tab".
+      if (msg.tabId == null) return { ok: true, data: [] };
+      const rules = await getRulesForTab(storageAdapter, msg.tabId);
+      return { ok: true, data: rules };
+    }
+    case 'sw:save-rule': {
+      const tabId = msg.rule.tabId;
+      const { tabId: _, ...ruleWithoutTabId } = msg.rule;
+      void _;
+      let scenarioId: string | undefined;
+      await withWriteLock(STORAGE_KEY_SCENARIOS, async () => {
+        const r = await saveRuleInActiveScenario(storageAdapter, tabId, ruleWithoutTabId);
+        scenarioId = r.scenarioId;
+        if (r.created) {
+          // Created an ephemeral scenario — also update active map.
+          await withWriteLock(STORAGE_KEY_ACTIVE, async () => {
+            await setActiveScenarioForTab(storageAdapter, tabId, scenarioId!);
+          });
+        }
+      });
+      await broadcastRulesToTab(tabId);
+      notifyPanel({ kind: 'panel:rules-updated' });
+      return { ok: true, data: { scenarioId } };
+    }
+    case 'sw:delete-rule': {
+      // The legacy message doesn't carry a tabId; find the rule across all active
+      // tabs. For v1.1 we look it up by walking the active map (small N).
+      const active = (await chrome.storage.local.get(STORAGE_KEY_ACTIVE))[STORAGE_KEY_ACTIVE] as
+        | Record<number, string>
+        | undefined;
+      let found = false;
+      if (active) {
+        for (const [tabIdStr] of Object.entries(active)) {
+          const tabId = Number(tabIdStr);
+          let removed = false;
+          await withWriteLock(STORAGE_KEY_SCENARIOS, async () => {
+            removed = await deleteRuleInActiveScenario(storageAdapter, tabId, msg.ruleId);
+          });
+          if (removed) {
+            await broadcastRulesToTab(tabId);
+            found = true;
+            break;
+          }
+        }
+      }
+      notifyPanel({ kind: 'panel:rules-updated' });
+      return { ok: true, data: { removed: found } };
+    }
+    case 'sw:toggle-rule': {
+      const active = (await chrome.storage.local.get(STORAGE_KEY_ACTIVE))[STORAGE_KEY_ACTIVE] as
+        | Record<number, string>
+        | undefined;
+      let changed = false;
+      if (active) {
+        for (const [tabIdStr] of Object.entries(active)) {
+          const tabId = Number(tabIdStr);
+          let did = false;
+          await withWriteLock(STORAGE_KEY_SCENARIOS, async () => {
+            did = await toggleRuleInActiveScenario(storageAdapter, tabId, msg.ruleId, msg.enabled);
+          });
+          if (did) {
+            await broadcastRulesToTab(tabId);
+            changed = true;
+            break;
+          }
+        }
+      }
+      notifyPanel({ kind: 'panel:rules-updated' });
+      return { ok: true, data: { changed } };
+    }
+
+    // ---- scenarios ----
+    case 'sw:list-scenarios': {
+      const scenarios = await listScenarios(storageAdapter);
+      return { ok: true, data: scenarios };
+    }
+    case 'sw:save-scenario': {
+      let stored: Scenario | undefined;
+      await withWriteLock(STORAGE_KEY_SCENARIOS, async () => {
+        const incoming = msg.scenario;
+        // Auto-rename on library name collision.
+        const existing = await getScenario(storageAdapter, incoming.id);
+        let finalName = incoming.name;
+        if (!existing) {
+          finalName = await uniqueNameFor(storageAdapter, incoming.name);
+        }
+        stored = { ...incoming, name: finalName };
+        await saveScenario(storageAdapter, stored);
+      });
+      notifyPanel({ kind: 'panel:scenarios-updated' });
+      // If this scenario is currently active in any tabs, push the new rules.
+      const active = (await chrome.storage.local.get(STORAGE_KEY_ACTIVE))[STORAGE_KEY_ACTIVE] as
+        | Record<number, string>
+        | undefined;
+      if (active && stored) {
+        for (const [tabIdStr, sid] of Object.entries(active)) {
+          if (sid === stored.id) await broadcastRulesToTab(Number(tabIdStr));
+        }
+      }
+      return { ok: true, data: stored };
+    }
+    case 'sw:delete-scenario': {
+      const affectedTabs: number[] = [];
+      await withWriteLock(STORAGE_KEY_SCENARIOS, async () => {
+        await withWriteLock(STORAGE_KEY_ACTIVE, async () => {
+          // Find tabs that had this scenario active so we can broadcast after.
+          const active = (await chrome.storage.local.get(STORAGE_KEY_ACTIVE))[STORAGE_KEY_ACTIVE] as
+            | Record<number, string>
+            | undefined;
+          if (active) {
+            for (const [tabIdStr, sid] of Object.entries(active)) {
+              if (sid === msg.scenarioId) affectedTabs.push(Number(tabIdStr));
+            }
+          }
+          await deleteScenarioFromStore(storageAdapter, msg.scenarioId);
+        });
+      });
+      await Promise.all(affectedTabs.map((id) => broadcastRulesToTab(id)));
+      notifyPanel({ kind: 'panel:scenarios-updated' });
+      return { ok: true };
+    }
+    case 'sw:load-scenario': {
+      await withWriteLock(STORAGE_KEY_ACTIVE, async () => {
+        await setActiveScenarioForTab(storageAdapter, msg.tabId, msg.scenarioId);
+      });
+      await broadcastRulesToTab(msg.tabId);
+      notifyPanel({ kind: 'panel:active-changed', tabId: msg.tabId, scenarioId: msg.scenarioId });
+      return { ok: true };
+    }
+    case 'sw:unload-scenario': {
+      await withWriteLock(STORAGE_KEY_ACTIVE, async () => {
+        await clearTabFromActive(storageAdapter, msg.tabId);
+      });
+      await broadcastRulesToTab(msg.tabId);
+      notifyPanel({ kind: 'panel:active-changed', tabId: msg.tabId, scenarioId: null });
+      return { ok: true };
+    }
+    case 'sw:get-active-scenario': {
+      const scenarioId = await getActiveScenarioIdForTab(storageAdapter, msg.tabId);
+      return { ok: true, data: { scenarioId } };
+    }
+
     default:
       return { ok: false, error: `unknown message kind: ${(msg as { kind: string }).kind}` };
   }

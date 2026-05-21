@@ -11,10 +11,12 @@ import type {
   Body,
   Capture,
   FromMainMessage,
+  MutationBody,
   Rule,
   ToMainMessage,
 } from '../shared/types';
 import { MOXY_MARKER } from '../shared/types';
+import { matcherMatches } from '../shared/match';
 
 (() => {
   const w = window as Window & { __moxy_installed?: boolean };
@@ -136,63 +138,33 @@ import { MOXY_MARKER } from '../shared/types';
   }
 
   // ---------- rule matching ----------
-
-  type URLPatternLike = new (init: string | object) => { test(url: string): boolean };
-
-  function urlMatches(pattern: string, url: string): boolean {
-    if (!pattern) return false;
-    const URLPatternCtor = (globalThis as { URLPattern?: URLPatternLike }).URLPattern;
-    if (typeof URLPatternCtor === 'function') {
-      try {
-        return new URLPatternCtor(pattern).test(url);
-      } catch {
-        /* fall through */
-      }
-    }
-    let regex = '^';
-    for (let i = 0; i < pattern.length; i++) {
-      const c = pattern[i];
-      if (c === '*') {
-        if (pattern[i + 1] === '*') {
-          regex += '.*';
-          i++;
-        } else {
-          regex += '[^/]*';
-        }
-      } else if (c === '?') {
-        regex += '[^/]';
-      } else if (/[\\^$.|+()[\]{}]/.test(c)) {
-        regex += '\\' + c;
-      } else {
-        regex += c;
-      }
-    }
-    regex += '$';
-    try {
-      return new RegExp(regex).test(url);
-    } catch {
-      return false;
-    }
-  }
-
-  function methodMatches(rulMethod: string, requestMethod: string): boolean {
-    if (!rulMethod || rulMethod === '*' || rulMethod.toUpperCase() === 'ANY') return true;
-    return rulMethod.toUpperCase() === requestMethod.toUpperCase();
-  }
+  // Dispatch lives in src/shared/match.ts so adding a new matcher type
+  // (regex / header / body-jsonpath in v1.2) only requires updating that file's
+  // switch — the exhaustiveness check fails compile here if a case is missed.
 
   function findMatchingRule(method: string, url: string): Rule | undefined {
     for (const r of rules) {
       if (!r.enabled) continue;
-      if (!methodMatches(r.match.method, method)) continue;
-      if (!urlMatches(r.match.urlGlob, url)) continue;
+      if (!matcherMatches(r.match, url, method)) continue;
       return r;
     }
     return undefined;
   }
 
-  function bodyToBodyInit(body: Body | undefined): BodyInit | null {
+  function bodyToBodyInit(body: Body | MutationBody | undefined): BodyInit | null {
     if (!body) return null;
     if (body.kind === 'text') return body.data;
+    if (body.kind === 'json') {
+      // JSON variant carries a JS value; stringify for the wire. Patches that
+      // also override Content-Type to application/json keep this consistent
+      // with the headers; if not, the page may misinterpret it — surfaced
+      // explicitly in the import-time validator (scenario.ts).
+      try {
+        return JSON.stringify(body.data);
+      } catch {
+        return null;
+      }
+    }
     if (body.kind === 'base64') {
       try {
         const binary = atob(body.data);
@@ -203,7 +175,7 @@ import { MOXY_MARKER } from '../shared/types';
         return null;
       }
     }
-    return null;
+    return null; // skipped (stream) — no body to synthesize from
   }
 
   // ---------- interceptor wiring ----------

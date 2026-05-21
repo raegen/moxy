@@ -3,6 +3,15 @@ export type Body =
   | { kind: 'base64'; data: string }
   | { kind: 'skipped'; reason: 'stream' };
 
+// Body shapes that can be used in a rule's mutate.body. `skipped` is a capture-only
+// marker (we can't replay streamed responses) so it's excluded. `json` is sugar that
+// preserves object structure across serialization; the patch JSON.stringify()s it
+// when building the synthesized Response.
+export type MutationBody =
+  | { kind: 'text'; data: string }
+  | { kind: 'base64'; data: string }
+  | { kind: 'json'; data: unknown };
+
 export type RequestRecord = {
   method: string;
   url: string;
@@ -28,18 +37,24 @@ export type Capture = {
   ruleId?: string;
 };
 
-export type MutationBody =
-  | { kind: 'text'; data: string }
-  | { kind: 'base64'; data: string };
+// Discriminated-union matcher type. v1.1 ships only `url-glob`. Future variants
+// (`regex`, `header`, `body-jsonpath`) are additive — adding a new type forces
+// match.ts dispatch to handle it via the `default: never` exhaustiveness check.
+export type Matcher =
+  | { type: 'url-glob'; pattern: string; method: string };
+
+// Reserved namespace for future stochastic / behavioral fields (probability,
+// jitter, repeat-N-times). Empty in v1.1; consumers should ignore unknown keys.
+export type RuleBehavior = Record<string, never>;
 
 export type Rule = {
   id: string;
+  // Scope: which tab(s) this rule applies to. v1.1 keeps `tabId: number` for
+  // backward compat with v1 rules; rules inside a scenario are scoped via
+  // moxy:active (which scenario is loaded in which tab).
   tabId: number;
   enabled: boolean;
-  match: {
-    method: string;
-    urlGlob: string;
-  };
+  match: Matcher;
   mutate: {
     status?: number;
     statusText?: string;
@@ -47,8 +62,55 @@ export type Rule = {
     body?: MutationBody;
     latencyMs?: number;
   };
+  behavior?: RuleBehavior;
   fromCaptureId?: string;
   createdAt: number;
+};
+
+// A named bundle of rules — the unit of sharing. Lives in moxy:scenarios; loaded
+// into a tab via moxy:active. Serialized to .moxy.json for export.
+export type Scenario = {
+  id: string;
+  moxyFormatVersion: 1;
+  name: string;
+  description?: string;
+  createdAt: number;
+  createdWith?: {
+    extensionVersion?: string;
+    userAgent?: string;
+  };
+  rules: Omit<Rule, 'tabId'>[];
+};
+
+// Serialized scenario shape (what lives in .moxy.json files). Differs from
+// in-memory Scenario in two ways: $schema URL, and discriminated body uses
+// `type:` (matches JSON Schema convention) rather than the in-code `kind:`.
+export type SerializedScenario = {
+  $schema?: string;
+  moxyFormatVersion: 1;
+  name: string;
+  description?: string;
+  createdAt: string; // ISO 8601
+  createdWith?: {
+    extensionVersion?: string;
+    userAgent?: string;
+  };
+  rules: Array<{
+    id?: string;
+    enabled?: boolean;
+    match: { type: 'url-glob'; pattern: string; method?: string };
+    mutate: {
+      status?: number;
+      statusText?: string;
+      headers?: Record<string, string>;
+      body?:
+        | { type: 'text'; data: string }
+        | { type: 'base64'; data: string }
+        | { type: 'json'; data: unknown };
+      latencyMs?: number;
+    };
+    behavior?: Record<string, unknown>;
+  }>;
 };
 
 export type FromMainMessage =
@@ -70,10 +132,20 @@ export type SwMessage =
   | { kind: 'sw:list-rules'; tabId?: number }
   | { kind: 'sw:clear-captures'; tabId?: number }
   | { kind: 'sw:get-global-enabled' }
-  | { kind: 'sw:set-global-enabled'; enabled: boolean };
+  | { kind: 'sw:set-global-enabled'; enabled: boolean }
+  // Scenario CRUD (v1.1b)
+  | { kind: 'sw:list-scenarios' }
+  | { kind: 'sw:save-scenario'; scenario: Scenario }
+  | { kind: 'sw:delete-scenario'; scenarioId: string }
+  | { kind: 'sw:load-scenario'; scenarioId: string; tabId: number }
+  | { kind: 'sw:unload-scenario'; tabId: number }
+  | { kind: 'sw:get-active-scenario'; tabId: number };
 
 export type SwResponse =
   | { ok: true; data?: unknown }
   | { ok: false; error: string };
 
 export const MOXY_MARKER = '__moxy_v1__';
+export const MOXY_FORMAT_VERSION = 1 as const;
+export const MOXY_EXTENSION_VERSION = '1.1.0';
+export const SCHEMA_URL = 'https://raw.githubusercontent.com/raegen/moxy/v1.1.0/schema/v1.json';

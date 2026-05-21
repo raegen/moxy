@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback, useMemo } from 'preact/hooks';
-import type { Capture, Rule, SwResponse } from '../shared/types';
+import type { Capture, Rule, Scenario, SwResponse } from '../shared/types';
 import { MutateDrawer } from './MutateDrawer';
+import { ScenarioBar } from './ScenarioBar';
+import { ScenariosTab } from './ScenariosTab';
 import { useTabId } from './TabContext';
 
 async function send<T = unknown>(msg: unknown): Promise<T | null> {
@@ -29,12 +31,14 @@ function statusColor(status: number): string {
   return 'var(--accent)';
 }
 
-type Tab = 'captures' | 'rules';
+type Tab = 'captures' | 'rules' | 'scenarios';
 
 export function App() {
   const tabId = useTabId();
   const [captures, setCaptures] = useState<Capture[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
+  const [scenarios, setScenarios] = useState<Scenario[]>([]);
+  const [activeScenarioId, setActiveScenarioId] = useState<string | null>(null);
   const [globalEnabled, setGlobalEnabled] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<Tab>('captures');
   const [selectedCapture, setSelectedCapture] = useState<Capture | null>(null);
@@ -42,14 +46,18 @@ export function App() {
 
   const refresh = useCallback(async (tid: number | null) => {
     if (tid == null) return;
-    const [caps, rls, ge] = await Promise.all([
+    const [caps, rls, ge, sc, ac] = await Promise.all([
       send<Capture[]>({ kind: 'sw:list-captures', tabId: tid }),
       send<Rule[]>({ kind: 'sw:list-rules', tabId: tid }),
       send<boolean>({ kind: 'sw:get-global-enabled' }),
+      send<Scenario[]>({ kind: 'sw:list-scenarios' }),
+      send<{ scenarioId: string | null }>({ kind: 'sw:get-active-scenario', tabId: tid }),
     ]);
     setCaptures(caps ?? []);
     setRules(rls ?? []);
     if (ge != null) setGlobalEnabled(ge);
+    setScenarios(sc ?? []);
+    setActiveScenarioId(ac?.scenarioId ?? null);
   }, []);
 
   // Re-fetch whenever the host changes the current tab. The side-panel host
@@ -80,6 +88,8 @@ export function App() {
         void refresh(tabId);
       } else if (msg.kind === 'panel:global-toggled') {
         if (typeof msg.enabled === 'boolean') setGlobalEnabled(msg.enabled);
+      } else if (msg.kind === 'panel:scenarios-updated' || msg.kind === 'panel:active-changed') {
+        void refresh(tabId);
       }
     };
     chrome.runtime.onMessage.addListener(listener);
@@ -115,7 +125,7 @@ export function App() {
         id: editingRule.fromCaptureId ?? editingRule.id,
         tabId: editingRule.tabId,
         ts: editingRule.createdAt,
-        request: { method: editingRule.match.method, url: editingRule.match.urlGlob, headers: {} },
+        request: { method: editingRule.match.method, url: editingRule.match.pattern, headers: {} },
         response: { status: 200, statusText: 'OK', headers: {}, body: { kind: 'text', data: '' } },
         durationMs: 0,
       } as Capture;
@@ -146,6 +156,17 @@ export function App() {
         </div>
       </header>
 
+      <ScenarioBar
+        active={
+          activeScenarioId ? scenarios.find((s) => s.id === activeScenarioId) ?? null : null
+        }
+        onUnload={async () => {
+          if (tabId == null) return;
+          await send({ kind: 'sw:unload-scenario', tabId });
+          void refresh(tabId);
+        }}
+      />
+
       <nav class="tabs">
         <button
           class={'tab' + (activeTab === 'captures' ? ' active' : '')}
@@ -158,6 +179,12 @@ export function App() {
           onClick={() => setActiveTab('rules')}
         >
           rules <span class="count">{rules.length}</span>
+        </button>
+        <button
+          class={'tab' + (activeTab === 'scenarios' ? ' active' : '')}
+          onClick={() => setActiveTab('scenarios')}
+        >
+          scenarios <span class="count">{scenarios.length}</span>
         </button>
       </nav>
 
@@ -218,8 +245,8 @@ export function App() {
                     />
                   </label>
                   <span class="rule-method">{r.match.method}</span>
-                  <span class="rule-glob" title={r.match.urlGlob}>
-                    {r.match.urlGlob}
+                  <span class="rule-glob" title={r.match.pattern}>
+                    {r.match.pattern}
                   </span>
                   <span class="rule-status">→ {r.mutate.status ?? 'passthru'}</span>
                   {r.mutate.latencyMs ? (
@@ -232,6 +259,15 @@ export function App() {
               ))}
             </ul>
           ))}
+
+        {activeTab === 'scenarios' && tabId !== null && (
+          <ScenariosTab
+            scenarios={scenarios}
+            activeScenarioId={activeScenarioId}
+            tabId={tabId}
+            onChanged={() => void refresh(tabId)}
+          />
+        )}
       </main>
 
       {captureToShowInDrawer && tabId !== null && (

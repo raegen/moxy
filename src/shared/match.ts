@@ -1,5 +1,11 @@
-// Tiny URL pattern matcher. Uses URLPattern when available, falls back to a
-// glob-to-regex shim so v1 doesn't require a polyfill on older Chrome.
+// URL pattern matching + matcher dispatch.
+//
+// Uses URLPattern when the runtime exposes it (Chrome 95+), falling back to a
+// glob-to-regex shim. The dispatch on Matcher.type uses a `default: never` cast
+// so any future matcher type added to types.ts forces this file to compile-fail
+// until a case is added. Catches v1.2 regressions at build time, not at runtime.
+
+import type { Matcher } from './types';
 
 type URLPatternLike = new (init: string | object) => { test(url: string): boolean };
 
@@ -44,4 +50,19 @@ function globToRegex(glob: string): RegExp {
 export function methodMatches(rulMethod: string, requestMethod: string): boolean {
   if (rulMethod === '*' || rulMethod === '' || rulMethod.toUpperCase() === 'ANY') return true;
   return rulMethod.toUpperCase() === requestMethod.toUpperCase();
+}
+
+// Dispatch a Matcher against a request. Exhaustiveness enforced via `default: never`
+// — adding a new variant to Matcher in types.ts without updating this switch will
+// fail TypeScript compilation. That's the v1.2-safety net.
+export function matcherMatches(matcher: Matcher, url: string, method: string): boolean {
+  switch (matcher.type) {
+    case 'url-glob':
+      return methodMatches(matcher.method, method) && urlMatches(matcher.pattern, url);
+    default: {
+      const _exhaustive: never = matcher.type;
+      void _exhaustive;
+      return false;
+    }
+  }
 }

@@ -40,6 +40,16 @@ export default defineConfig({
   build: {
     target: 'es2022',
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        // CRXJS discovers HTML entries via manifest fields (default_popup,
+        // side_panel.default_path, devtools_page). The DevTools panel itself
+        // is referenced as a string argument to chrome.devtools.panels.create
+        // at runtime, which static analysis can't see. List it explicitly so
+        // Rollup emits the HTML + its bundled JS into dist/.
+        devtoolsPanel: 'src/devtools/panel/index.html',
+      },
+    },
   },
   server: {
     port: 5173,

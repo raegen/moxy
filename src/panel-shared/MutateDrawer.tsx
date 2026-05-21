@@ -71,7 +71,7 @@ function send<T = unknown>(msg: unknown): Promise<T | null> {
 }
 
 export function MutateDrawer({ capture, tabId, existingRule, onClose, onSaved }: Props) {
-  const [urlGlob, setUrlGlob] = useState(existingRule?.match.urlGlob ?? suggestGlob(capture.request.url));
+  const [urlGlob, setUrlGlob] = useState(existingRule?.match.pattern ?? suggestGlob(capture.request.url));
   const [method, setMethod] = useState(existingRule?.match.method ?? capture.request.method);
   const [status, setStatus] = useState(String(existingRule?.mutate.status ?? capture.response.status));
   const [statusText, setStatusText] = useState(existingRule?.mutate.statusText ?? capture.response.statusText);
@@ -112,8 +112,9 @@ export function MutateDrawer({ capture, tabId, existingRule, onClose, onSaved }:
       tabId,
       enabled: existingRule?.enabled ?? true,
       match: {
+        type: 'url-glob',
         method: method.trim() || '*',
-        urlGlob: urlGlob.trim(),
+        pattern: urlGlob.trim(),
       },
       mutate: {
         status: Number(status) || undefined,
