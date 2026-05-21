@@ -1,6 +1,6 @@
 {
   "name": "moxy",
-  "version": "0.1.0",
+  "version": "1.0.1",
   "description": "Chrome extension for full response mocking — including status codes.",
   "private": true,
   "type": "module",

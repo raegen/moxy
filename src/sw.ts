@@ -49,9 +49,77 @@ function registerPatchScript(): Promise<void> {
   return registerPromise;
 }
 
-chrome.runtime.onInstalled.addListener(() => void registerPatchScript());
-chrome.runtime.onStartup.addListener(() => void registerPatchScript());
-void registerPatchScript();
+// Cold-start fix (v1.0.1). chrome.scripting.registerContentScripts only fires
+// on new page loads — tabs already open when the extension installs or reloads
+// would otherwise need a manual reload before patch.js + bridge re-inject. This
+// iterates every eligible http(s) tab and force-injects via executeScript.
+// Idempotent: __moxy_installed / __moxy_bridge_installed guards make re-inject
+// a no-op when already installed.
+async function injectIntoExistingTabs(): Promise<void> {
+  const tabs = await chrome.tabs.query({});
+  const manifest = chrome.runtime.getManifest();
+  // Bridge files are declared in manifest.content_scripts. CRXJS bundles them
+  // to hashed filenames; reading at runtime avoids hardcoding the hash.
+  const bridgeFiles =
+    manifest.content_scripts?.flatMap((cs) => cs.js ?? []) ?? [];
+
+  await Promise.all(
+    tabs.map(async (tab) => {
+      if (!tab.id || !tab.url) return;
+      if (!/^https?:/i.test(tab.url)) return; // skip chrome://, file://, edge cases
+
+      // Incognito: chrome.extension.isAllowedIncognitoAccess() reflects the
+      // user-level "Allow in incognito" toggle. inIncognitoContext only tells
+      // us about the SW's own context, which is the wrong question.
+      if (tab.incognito) {
+        try {
+          const allowed = await chrome.extension.isAllowedIncognitoAccess();
+          if (!allowed) return;
+        } catch {
+          return;
+        }
+      }
+
+      // MAIN-world patch. injectImmediately: page is already past
+      // document_start, so inject ASAP.
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['patch.js'],
+          world: 'MAIN',
+          injectImmediately: true,
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(`[moxy] patch inject failed for ${tab.url} — ${msg}`);
+      }
+
+      // ISOLATED-world bridge.
+      if (bridgeFiles.length > 0) {
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: bridgeFiles,
+          });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.warn(`[moxy] bridge inject failed for ${tab.url} — ${msg}`);
+        }
+      }
+    })
+  );
+}
+
+// Run after patch script registration. onInstalled fires on fresh install and
+// on every extension reload during dev — both code paths benefit.
+async function bootSequence(): Promise<void> {
+  await registerPatchScript();
+  await injectIntoExistingTabs();
+}
+
+chrome.runtime.onInstalled.addListener(() => void bootSequence());
+chrome.runtime.onStartup.addListener(() => void bootSequence());
+void bootSequence();
 
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "moxy",
-  "version": "0.1.0",
+  "version": "1.0.1",
   "description": "Capture real responses, mutate status / body / latency, replay. No yellow banner.",
   "permissions": ["scripting", "storage", "tabs", "sidePanel"],
   "host_permissions": ["<all_urls>"],
