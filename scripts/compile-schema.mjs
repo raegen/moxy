@@ -14,6 +14,7 @@
 
 import Ajv from 'ajv/dist/2020.js';
 import standaloneCode from 'ajv/dist/standalone/index.js';
+import addFormats from 'ajv-formats';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -33,6 +34,13 @@ const ajv = new Ajv.default({
   allErrors: true,
   strict: false,
 });
+
+// ajv-formats supplies the implementations for `format` keywords in the schema
+// (we use date-time on createdAt). Without it ajv accepts any string and emits
+// `unknown format "date-time" ignored` — the schema would silently fail to
+// enforce the format it advertises.
+addFormats.default(ajv, { mode: 'fast', formats: ['date-time'] });
+
 const validate = ajv.compile(schema);
 
 let code = standaloneCode.default(ajv, validate);

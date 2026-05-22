@@ -163,6 +163,21 @@ describe('parseScenario — rejections', () => {
     json.rules[0].mutate.body = { type: 'msgpack', data: 'whatever' };
     expect(() => parseScenario(JSON.stringify(json))).toThrow(ScenarioImportError);
   });
+
+  it('rejects invalid ISO 8601 date string in createdAt (schema enforces date-time format)', () => {
+    // Regression for v1.1.1 schema lie: createdAt had format: date-time but
+    // ajv-formats wasn't wired, so any string passed. v1.1.2 enforces it.
+    const json = JSON.parse(MIN_VALID);
+    json.createdAt = 'yesterday lol';
+    expect(() => parseScenario(JSON.stringify(json))).toThrow(ScenarioImportError);
+  });
+
+  it('accepts valid ISO 8601 date string in createdAt', () => {
+    const json = JSON.parse(MIN_VALID);
+    json.createdAt = '2026-05-22T10:30:00Z';
+    const { scenario } = parseScenario(JSON.stringify(json));
+    expect(scenario.createdAt).toBe(Date.parse('2026-05-22T10:30:00Z'));
+  });
 });
 
 describe('parseScenario — warnings', () => {
