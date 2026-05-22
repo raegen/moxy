@@ -4,11 +4,11 @@
 [![license](https://img.shields.io/badge/license-MIT-8b5cf6)](LICENSE)
 [![tests](https://github.com/raegen/moxy/actions/workflows/test.yml/badge.svg)](https://github.com/raegen/moxy/actions/workflows/test.yml)
 
-**Mock HTTP responses from your browser.** Override status codes, bodies, headers, latency — in any tab — without a backend proxy and without the yellow `chrome://debugger` banner.
+**Mock HTTP responses from your browser.** Override status codes, bodies, headers, latency — in any tab you've granted access to — without a backend proxy and without the yellow `chrome://debugger` banner.
 
 Chrome DevTools' "Local Overrides" can change response bodies but not status codes. moxy fills the gap: intercept your page's `fetch` and `XMLHttpRequest` calls, snapshot the real response, mutate any part of it, save the rule into a **scenario**, share that scenario as a `.moxy.json` file. Attach a broken state to a bug report. Reproduce a teammate's edge case in one click.
 
-> Status: v1.2.0 — branding + Chrome Web Store prep. CWS submission is the next step.
+> Status: v1.3.0 — per-site `optional_host_permissions` + slim side panel. Chrome Web Store submission is the next step.
 
 ## Install
 
@@ -29,17 +29,24 @@ Coming soon. See `store-assets/README.md` for the submission checklist.
 
 ## Usage
 
-### Side panel
+moxy grants permissions **per-site**, not all-sites. After install, no site has access — you grant per origin as you encounter it.
 
-Click the moxy icon in the toolbar to open the side panel. Three tabs:
+### DevTools panel (where the work happens)
 
-- **captures** — every request your page made. Click one to mutate it into a rule.
-- **rules** — what's actively mocked in this tab. Toggle individual rules; the **ON/OFF** pill in the header is the global kill switch.
-- **scenarios** — your library of saved bundles. Import a `.moxy.json`, load it into the current tab, export the active one as a file.
+Open Chrome DevTools on a site → click the **moxy** tab next to Network/Console. The first time you open it on an origin, Chrome shows its per-site permission prompt — grant once, mock thereafter. Three tabs inside:
 
-### DevTools panel
+- **captures** — every request the page made. Click one to mutate it into a rule.
+- **rules** — what's actively mocked in this tab. Toggle individual rules.
+- **scenarios** — your library of saved bundles. Import a `.moxy.json`, load it into the current tab, export the active one, save the current rules as a new scenario.
 
-Open Chrome DevTools → the **moxy** panel appears next to Network/Console. Same UI as the side panel, scoped to the tab DevTools is inspecting. Stay in DevTools while you mock — no context switch.
+### Side panel (cross-tab visibility)
+
+Click the moxy icon in the toolbar to open the side panel. Two things:
+
+- **ON/OFF pill** — global kill switch. Mutes interception across all live patches without revoking permissions.
+- **Active tabs** — one row per tab where moxy is currently mocking, with the active scenario name and rule count. Click `switch ▸` to focus that tab and window.
+
+Revoking access to a site goes through `chrome://extensions` → moxy → Site access.
 
 ### Scenarios
 
@@ -79,16 +86,16 @@ bun run build:icons  # regenerate icons/*.png from icons/moxy.svg
 bun run build:schema # recompile schema/v1.json into the precompiled validator
 ```
 
-The MAIN-world patch builds as a self-contained IIFE (Vite lib mode in a second pass) because `chrome.scripting.executeScript` loads classic scripts; ESM `import` would throw. The JSON-Schema validator is precompiled via ajv standalone + esbuild bundle so MV3's `unsafe-eval` ban doesn't kill it. The rest is normal CRXJS / code-split ESM.
+Both injected scripts (MAIN-world patch + ISOLATED-world bridge) build as self-contained IIFEs (Vite lib mode in a second pass) because `chrome.scripting.executeScript` loads classic scripts; ESM `import` would throw. The JSON-Schema validator is precompiled via ajv standalone + esbuild bundle so MV3's `unsafe-eval` ban doesn't kill it. The rest is normal CRXJS / code-split ESM.
 
 ## Architecture
 
-- `src/sw.ts` — service worker. Migrates v1 storage → v1.1 on install. Registers the MAIN-world patch via `chrome.scripting.registerContentScripts` and force-injects into already-open tabs at boot (cold-start fix). Holds scenarios + active-scenario-per-tab in `chrome.storage.local`. All read-modify-write goes through a per-key write lock.
+- `src/sw.ts` — service worker. Migrates v1 storage → v1.1 on install. Registers patch (MAIN) + bridge (ISOLATED) via `chrome.scripting.registerContentScripts`, scoped to currently-granted origins; syncs on `chrome.permissions.onAdded`/`onRemoved`. Holds scenarios + active-scenario-per-tab in `chrome.storage.local`. All read-modify-write goes through a per-key write lock.
 - `src/inject/patch.ts` — MAIN-world content script. Wraps `window.fetch` + `XMLHttpRequest` via [`@mswjs/interceptors`](https://github.com/mswjs/interceptors). Matches rules locally, returns synthesized `Response` objects.
 - `src/inject/bridge.ts` — ISOLATED world content script. Relays nonce handshake + capture stream + rule broadcasts between MAIN-world patch and SW. Idempotent — safe to re-inject. Defensive against invalidated extension contexts.
-- `src/panel/` — side panel host. Owns the active-tab subscription.
-- `src/devtools/` — DevTools page launcher + dedicated panel host. Reads `chrome.devtools.inspectedWindow.tabId`.
-- `src/panel-shared/` — Preact UI shared between both panel hosts. `TabContext` injects the "current tab id" — different per host.
+- `src/side-panel/` — slim mission control. ON/OFF pill + active-tabs roster with click-to-switch. No TabContext; the side panel has no single "current tab."
+- `src/devtools/panel/` — full per-tab working surface (captures, rules, scenarios). Auto-requests host permission for the inspected origin on first mount via `PermissionGate`. `TabContext` feeds `chrome.devtools.inspectedWindow.tabId`.
+- `src/panel-shared/` — `panel.css` only (shared by both hosts).
 - `src/shared/` — types, URL matcher, scenario parse/serialize/hash, v1 migration, storage write lock.
 - `schema/v1.json` — canonical scenario format contract. Precompiled to `src/shared/generated/validate-v1.mjs` via `scripts/compile-schema.mjs`.
 - `icons/moxy.svg` — icon source. Rasterized to PNGs via `scripts/generate-icons.mjs`.
@@ -99,9 +106,9 @@ moxy makes no network requests. All storage is local to your Chrome profile. See
 
 ## Known limitations
 
-- **Editing the same rule from both the side panel and the DevTools panel simultaneously is last-write-wins.** Work in one surface at a time, or refresh before saving when both are open.
+- **Pre-grant requests are missed.** Programmatic injection happens AFTER `document_start`, so requests fired during the page load *before* you granted access (or before reloading after grant) won't be intercepted. The DevTools panel shows a one-time reload reminder after a fresh grant.
 - **Incognito.** moxy works in incognito tabs only if you've enabled "Allow in incognito" for the extension. Side panel and DevTools panel write to different `chrome.storage.local` partitions across the incognito boundary.
-- **Cold-start coverage.** The v1.0.1 fix re-injects on extension reload but doesn't catch fetch/XHR calls that fired *during* the page load that preceded the install. Reload the tab once after a fresh install for full coverage.
+- **`file://` URLs.** Not currently mockable. moxy is `http(s)://` only in v1.3.
 - **Restart drops active scenarios.** Tab IDs recycle across Chrome restarts; moxy clears the active-scenario-per-tab map on startup. Your scenario library persists; reload into the tab manually.
 - **Streaming responses** (`text/event-stream`, chunked) are captured-only, not mockable. moxy logs a console warning and passes the real response through.
 

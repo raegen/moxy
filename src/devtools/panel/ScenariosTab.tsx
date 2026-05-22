@@ -1,6 +1,6 @@
 import { useState } from 'preact/hooks';
-import type { Scenario, SwResponse } from '../shared/types';
-import { parseScenario, serializeScenario, ScenarioImportError } from '../shared/scenario';
+import type { Scenario, SwResponse } from '../../shared/types';
+import { parseScenario, serializeScenario, ScenarioImportError } from '../../shared/scenario';
 
 type Props = {
   scenarios: Scenario[];

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'preact/hooks';
-import type { Capture, Rule, MutationBody, SwResponse } from '../shared/types';
+import type { Capture, Rule, MutationBody, SwResponse } from '../../shared/types';
 
 type Props = {
   capture: Capture;

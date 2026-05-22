@@ -22,55 +22,37 @@ moxy mocks HTTP responses (`fetch` and `XMLHttpRequest`) in the user's active br
 
 ## Privacy practices → Host permission justification
 
-`<all_urls>` is required because moxy must inject a request interceptor into whichever tab the developer is testing. Developers cannot know in advance which sites they will need to mock against — the target varies per project, per task, per debugging session. The side panel and DevTools panel are user-driven: moxy only applies mock rules to tabs the user has explicitly scoped rules to via the panel UI. Without `<all_urls>`, moxy cannot support its stated single purpose for the general case of "whatever web app the developer is currently building or debugging."
+moxy declares `<all_urls>` under `optional_host_permissions`, not the required field, so the install dialog shows no host warning. Access is granted per-site at runtime — when the user opens the moxy DevTools panel on a site, Chrome's standard per-site permission prompt fires. Only origins the user explicitly grants are ever intercepted. The optional set spans `<all_urls>` because moxy cannot predict which sites a developer needs to mock; the target varies per project and debugging session.
 
 ---
 
 ## Privacy practices → Remote code justification
 
-moxy does NOT load, execute, or evaluate any remote code. All extension JavaScript is bundled at build time via Vite + esbuild:
-
-- The MAIN-world request interceptor (`patch.js`) ships as a self-contained IIFE with `@mswjs/interceptors` inlined.
-- The JSON Schema validator for scenario files (`validate-v1.mjs`) is precompiled via `ajv` standalone + `esbuild --bundle --format=esm` — no `new Function`, no `eval`, no runtime schema compilation.
-- All dependencies are resolved and inlined at build time. No CDN scripts, no remote module loading, no dynamic `import()` of external URLs.
-
-The only "code-like" content moxy handles at runtime is the response body the developer types into the mutation form, which is then served back to the developer's own page as a synthesized `Response` object. This is data flowing from the developer to the developer's own application — equivalent to typing a JSON literal into Chrome DevTools — not external code execution by the extension.
+moxy loads, executes, and evaluates no remote code. All JavaScript is bundled at build time via Vite + esbuild. The MAIN-world interceptor (`patch.js`) is a self-contained IIFE with `@mswjs/interceptors` inlined. The JSON Schema validator is precompiled via ajv standalone + esbuild — no `new Function`, no `eval`, no runtime schema compilation. No CDN scripts, no remote modules, no dynamic `import()` of external URLs. Response bodies the user types into the rule editor are served back to their own page as synthesized `Response` objects — data, not external code execution.
 
 ---
 
 ## Privacy practices → `scripting` justification
 
-moxy uses `chrome.scripting.registerContentScripts` to register a MAIN-world content script (`patch.js`) that wraps `window.fetch` and `XMLHttpRequest` on pages the user is testing. This is the request-interception primitive at the heart of moxy's single purpose. It also uses `chrome.scripting.executeScript` to re-inject the patch into already-open tabs when the extension is reloaded during development (so the user does not have to reload every tab manually after each extension update).
+moxy registers two content scripts on user-granted origins via `chrome.scripting.registerContentScripts`: `patch.js` (MAIN world) wraps `window.fetch` and `XMLHttpRequest` — the request-interception primitive at the heart of the single purpose. `bridge.js` (ISOLATED world) relays captured-request data and rule updates to the service worker. The registration's `matches` array stays in sync with currently-granted origins. `executeScript` is used to inject into already-open tabs at grant time so the user does not have to reload manually.
 
 ---
 
 ## Privacy practices → `sidePanel` justification
 
-moxy's primary user interface is rendered in the Chrome side panel via `chrome.sidePanel`. Users click the moxy toolbar action to open the side panel and view captured requests, edit mock rules, and manage scenarios. The `sidePanel` permission is required to register and open this UI surface. There is no alternative UI mechanism that provides the same persistent, side-by-side view next to the developer's app.
+moxy renders cross-tab mission control in the Chrome side panel via `chrome.sidePanel`: global ON/OFF kill switch and a roster of tabs where moxy is currently mocking, with click-to-switch jump buttons. Users click the toolbar action to open it. `sidePanel` is required to register this UI surface.
 
 ---
 
 ## Privacy practices → `storage` justification
 
-moxy persists user-created mock rules and a per-tab rolling buffer of recent captures to `chrome.storage.local`. This data is essential to the extension's core function:
-
-- Without storage, mock rules would vanish on tab refresh or extension reload.
-- The side panel could not show recent captures.
-- Scenarios (named bundles of rules, imported from `.moxy.json` files) could not persist between sessions.
-
-All storage is local to the user's Chrome profile. moxy makes no outbound network requests and transmits no user data to any external service.
+moxy persists mock rules, scenarios, and a per-tab capture buffer to `chrome.storage.local`. Without storage, rules would vanish on refresh, the DevTools panel could not show recent captures, scenarios could not persist between sessions, and the side panel roster could not survive service-worker wake/sleep cycles. All storage is local to the user's Chrome profile; moxy makes no outbound network requests.
 
 ---
 
 ## Privacy practices → `tabs` justification
 
-moxy is per-tab by design. The `tabs` permission is used to:
-
-1. Determine the currently-active tab id so the side panel can scope mock rules and captures to that tab.
-2. Listen for `chrome.tabs.onActivated` so the panel UI updates when the user switches between tabs.
-3. Listen for `chrome.tabs.onRemoved` to clean up per-tab state (active scenario, capture buffer) when tabs close, preventing storage leaks across browsing sessions.
-
-moxy does not enumerate, modify, or read the content of tabs outside the explicit per-tab scoping the user has set up via the panel UI.
+moxy uses `tabs` to: (1) render the side panel's active-tabs roster via `chrome.tabs.query` (`tab.url` is otherwise stripped on ungranted origins); (2) click-to-switch from a roster row via `chrome.tabs.update` + `chrome.windows.update`; (3) read the DevTools-inspected tab's URL via `chrome.tabs.get` to derive the origin to request host permission for; (4) iterate open tabs after a grant to inject into already-loaded matching pages; (5) clean up per-tab state via `chrome.tabs.onRemoved` when tabs close.
 
 ---
 
@@ -111,12 +93,15 @@ https://github.com/raegen/moxy/blob/main/PRIVACY.md
 
 Chrome DevTools' Local Overrides can change response bodies, but not status codes. moxy fills the gap.
 
+**Per-site access, granted as you go.** moxy ships with no host permissions at install. Open the moxy panel in Chrome DevTools on a site you want to mock; Chrome asks once whether you want to grant moxy access to that site. Grant, mock, done. Other sites stay untouched until you grant them too. Revoke any site anytime from `chrome://extensions`.
+
 **The workflow:**
 
-1. Open the moxy side panel on the tab you're debugging.
-2. Every request your page makes shows up in the captures list with its real response.
-3. Click a capture, change the status to 500, hit save. The next time your app makes that call, it sees the mocked response.
-4. Save a set of mocked calls as a **scenario** — a named JSON bundle you can export, share with a teammate, or attach to a bug report. Drop the file into their moxy and they see the same broken state.
+1. Navigate to the site you're debugging and open Chrome DevTools.
+2. Click the **moxy** tab in DevTools — Chrome's per-site permission prompt appears the first time. Grant it.
+3. Every request your page makes shows up in the captures list with its real response.
+4. Click a capture, change the status to 500, hit save. The next time your app makes that call, it sees the mocked response.
+5. Save a set of mocked calls as a **scenario** — a named JSON bundle you can export, share with a teammate, or attach to a bug report. Drop the file into their moxy and they see the same broken state.
 
 **Built for testing how your app handles error paths.**
 
@@ -126,10 +111,10 @@ Chrome DevTools' Local Overrides can change response bodies, but not status code
 - Override response headers — CORS, cache, content-type — to test header-dependent client logic.
 - Mock a single endpoint or a whole scenario, scoped to one tab so other tabs aren't affected.
 
-**Two surfaces:**
+**Two surfaces, two jobs:**
 
-- **Side panel** — persistent UI alongside your app for capture browsing and rule editing.
-- **DevTools panel** — the same UI inside Chrome DevTools, scoped to the tab DevTools is inspecting. Stay in DevTools while you mock.
+- **DevTools panel** — the per-tab working surface. Captures, rules, scenarios — all where you already are when you're debugging.
+- **Side panel** — cross-tab mission control. Global ON/OFF kill switch and a roster of every tab moxy is currently mocking. Click a row to jump to that tab.
 
 **Local-only.** moxy makes no outbound network requests. All rules and captures are stored in `chrome.storage.local`, never synced or transmitted anywhere. Full privacy policy: https://github.com/raegen/moxy/blob/main/PRIVACY.md
 
@@ -153,5 +138,5 @@ Mock HTTP responses in your browser. Override status, body, headers, latency. Sh
 2. **Settings → Account** — pay the $5 one-time developer fee if not already done.
 3. **Privacy practices** — paste each justification above into its respective field. Tick the data-usage compliance checkbox.
 4. **Store listing** — upload screenshots (3-5 at 1280×800), paste the detailed description, set category to Developer Tools, set privacy policy URL.
-5. **Package** — `cd dist && zip -r ../moxy-v1.2.0.zip .` then upload the zip.
+5. **Package** — `cd dist && zip -r ../moxy-v1.3.0.zip .` then upload the zip.
 6. **Submit for review.** Typical CWS review for a new extension: 1-3 business days.

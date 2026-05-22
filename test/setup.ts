@@ -3,7 +3,10 @@ import { cleanup } from '@testing-library/preact';
 
 afterEach(() => {
   cleanup();
-  vi.restoreAllMocks();
+  // clearAllMocks preserves implementations (mockResolvedValue, etc.) while
+  // resetting call history. restoreAllMocks() would wipe the chrome.* stubs
+  // back to bare vi.fn() returning undefined, breaking async-gated UI tests.
+  vi.clearAllMocks();
 });
 
 // Minimal chrome.* stub. Tests can override individual methods via vi.spyOn
@@ -22,9 +25,27 @@ const chromeStub = {
   },
   tabs: {
     query: vi.fn().mockResolvedValue([{ id: 1, url: 'https://example.com' }]),
+    get: vi.fn().mockResolvedValue({ id: 42, url: 'https://example.com/', windowId: 1 }),
+    update: vi.fn().mockResolvedValue(undefined),
     onActivated: { addListener: vi.fn(), removeListener: vi.fn() },
-    onRemoved: { addListener: vi.fn() },
+    onRemoved: { addListener: vi.fn(), removeListener: vi.fn() },
     sendMessage: vi.fn().mockResolvedValue(undefined),
+  },
+  windows: {
+    update: vi.fn().mockResolvedValue(undefined),
+  },
+  permissions: {
+    // Default to granted so existing tests render the App without gating.
+    contains: vi.fn().mockResolvedValue(true),
+    request: vi.fn().mockResolvedValue(true),
+    remove: vi.fn().mockResolvedValue(true),
+    getAll: vi.fn().mockResolvedValue({ permissions: [], origins: ['<all_urls>'] }),
+    onAdded: { addListener: vi.fn() },
+    onRemoved: { addListener: vi.fn() },
+  },
+  devtools: {
+    inspectedWindow: { tabId: 42 },
+    network: { onNavigated: { addListener: vi.fn(), removeListener: vi.fn() } },
   },
   storage: {
     local: {

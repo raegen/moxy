@@ -5,9 +5,7 @@
 
 chrome.devtools.panels.create(
   'moxy',
-  // icon path — Chrome supports 24x24 PNG; using the existing extension icon
-  // for v1.1b. A purpose-built icon can land later without a manifest bump.
-  'hello_extensions.png',
+  'icons/moxy-24.png',
   'src/devtools/panel/index.html',
   (panel) => {
     void panel;

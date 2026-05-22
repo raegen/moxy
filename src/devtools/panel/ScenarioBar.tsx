@@ -1,4 +1,4 @@
-import type { Scenario } from '../shared/types';
+import type { Scenario } from '../../shared/types';
 
 type Props = {
   active: Scenario | null;

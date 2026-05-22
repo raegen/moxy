@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from 'preact/hooks';
-import type { Capture, Rule, Scenario, SwResponse } from '../shared/types';
+import type { Capture, Rule, Scenario, SwResponse } from '../../shared/types';
 import { MutateDrawer } from './MutateDrawer';
 import { ScenarioBar } from './ScenarioBar';
 import { ScenariosTab } from './ScenariosTab';

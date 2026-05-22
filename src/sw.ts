@@ -1,11 +1,17 @@
 // moxy service worker — rule storage, capture buffer, scenarios, broadcasts.
 //
 // Boot order matters: migration runs first (reads moxy:formatVersion flag),
-// then patch.js registration, then existing-tab injection (the v1.0.1 cold-
-// start fix). All storage writes go through withWriteLock to serialize
-// concurrent saves across the side panel + DevTools panel + capture stream.
+// then content-script registration (synced to currently-granted origins),
+// then existing-tab injection. All storage writes go through withWriteLock
+// to serialize concurrent saves across the side panel + DevTools panel +
+// capture stream.
+//
+// v1.3 — content scripts (patch + bridge) are registered programmatically,
+// scoped to the host origins the user has granted via optional_host_permissions.
+// The manifest no longer declares static content_scripts; bridge injection is
+// also programmatic and runs alongside the patch.
 
-import type { Capture, Scenario, SwMessage, SwResponse } from './shared/types';
+import type { Capture, RosterRow, Scenario, SwMessage, SwResponse } from './shared/types';
 import { migrateV1ToV11, chromeStorageAdapter } from './shared/migrate';
 import { withWriteLock } from './shared/storage';
 import {
@@ -28,55 +34,88 @@ import {
 } from './shared/scenario-store';
 
 const PATCH_SCRIPT_ID = 'moxy-patch';
+const BRIDGE_SCRIPT_ID = 'moxy-bridge';
 const STORAGE_KEY_CAPTURES = 'moxy:captures';
 const STORAGE_KEY_GLOBAL_ENABLED = 'moxy:enabled';
 const CAPTURE_BUFFER_LIMIT_PER_TAB = 500;
 
 const storageAdapter = chromeStorageAdapter();
 
-// ---------- registration ----------
+// ---------- permission-scoped content script registration ----------
 
-let registerPromise: Promise<void> | null = null;
+// Sync the registered content scripts (patch + bridge) so their `matches` array
+// reflects the origins the user currently has granted via optional_host_permissions.
+// Called at boot AND on every chrome.permissions.onAdded / onRemoved.
+//
+// Concurrent calls are serialized through a single in-flight promise — Chrome's
+// register/update API will throw on overlapping mutation.
+let syncInFlight: Promise<void> | null = null;
 
-function registerPatchScript(): Promise<void> {
-  if (registerPromise) return registerPromise;
-  registerPromise = (async () => {
+async function syncContentScriptRegistration(): Promise<void> {
+  if (syncInFlight) return syncInFlight;
+  syncInFlight = (async () => {
     try {
-      const existing = await chrome.scripting.getRegisteredContentScripts({
-        ids: [PATCH_SCRIPT_ID],
-      });
-      if (existing.length > 0) return;
+      const { origins = [] } = await chrome.permissions.getAll();
+      // Filter to actual URL match patterns; `permissions` may include API keys.
+      const matches = origins.filter((o) => /^(\*|https?|file):/.test(o) || o === '<all_urls>');
 
-      await chrome.scripting.registerContentScripts([
-        {
-          id: PATCH_SCRIPT_ID,
-          matches: ['<all_urls>'],
-          js: ['patch.js'],
-          runAt: 'document_start',
-          world: 'MAIN',
-          allFrames: false,
-          persistAcrossSessions: true,
-        },
-      ]);
-      console.log('[moxy] patch script registered');
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes('Duplicate script ID')) {
-        console.log('[moxy] patch script already registered');
+      const existing = await chrome.scripting.getRegisteredContentScripts({
+        ids: [PATCH_SCRIPT_ID, BRIDGE_SCRIPT_ID],
+      });
+      const existingIds = new Set(existing.map((s) => s.id));
+
+      if (matches.length === 0) {
+        if (existingIds.size > 0) {
+          await chrome.scripting.unregisterContentScripts({ ids: [...existingIds] });
+          console.log('[moxy] no granted origins — content scripts unregistered');
+        }
         return;
       }
-      console.error('[moxy] register failed', e);
-      throw e;
+
+      const patchScript: chrome.scripting.RegisteredContentScript = {
+        id: PATCH_SCRIPT_ID,
+        matches,
+        js: ['patch.js'],
+        runAt: 'document_start',
+        world: 'MAIN',
+        allFrames: false,
+        persistAcrossSessions: true,
+      };
+      const bridgeScript: chrome.scripting.RegisteredContentScript = {
+        id: BRIDGE_SCRIPT_ID,
+        matches,
+        js: ['bridge.js'],
+        runAt: 'document_start',
+        world: 'ISOLATED',
+        allFrames: false,
+        persistAcrossSessions: true,
+      };
+
+      const toRegister: chrome.scripting.RegisteredContentScript[] = [];
+      const toUpdate: chrome.scripting.RegisteredContentScript[] = [];
+      for (const s of [patchScript, bridgeScript]) {
+        if (existingIds.has(s.id)) toUpdate.push(s);
+        else toRegister.push(s);
+      }
+
+      if (toRegister.length > 0) await chrome.scripting.registerContentScripts(toRegister);
+      if (toUpdate.length > 0) await chrome.scripting.updateContentScripts(toUpdate);
+      console.log(`[moxy] content scripts synced to ${matches.length} origin pattern(s)`);
+    } catch (e) {
+      console.error('[moxy] content script sync failed', e);
+    } finally {
+      syncInFlight = null;
     }
   })();
-  return registerPromise;
+  return syncInFlight;
 }
 
+// Inject patch + bridge into already-open tabs whose origin the user has
+// granted permission for. Called at boot and on chrome.permissions.onAdded.
+// Pre-load fetch/XHR calls (fired before document_start of the injection) are
+// missed — DevTools shows a toast telling the user to reload.
 async function injectIntoExistingTabs(): Promise<void> {
   const tabs = await chrome.tabs.query({});
-  const manifest = chrome.runtime.getManifest();
-  const bridgeFiles =
-    manifest.content_scripts?.flatMap((cs) => cs.js ?? []) ?? [];
 
   await Promise.all(
     tabs.map(async (tab) => {
@@ -90,6 +129,15 @@ async function injectIntoExistingTabs(): Promise<void> {
           return;
         }
       }
+      // Per-tab permission check — skip silently for ungranted origins.
+      let granted = false;
+      try {
+        granted = await chrome.permissions.contains({ origins: [tab.url] });
+      } catch {
+        return;
+      }
+      if (!granted) return;
+
       try {
         await chrome.scripting.executeScript({
           target: { tabId: tab.id },
@@ -98,17 +146,21 @@ async function injectIntoExistingTabs(): Promise<void> {
           injectImmediately: true,
         });
       } catch (e) {
-        console.warn(`[moxy] patch inject failed for ${tab.url} — ${e instanceof Error ? e.message : String(e)}`);
+        console.warn(
+          `[moxy] patch inject failed for ${tab.url} — ${e instanceof Error ? e.message : String(e)}`
+        );
       }
-      if (bridgeFiles.length > 0) {
-        try {
-          await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            files: bridgeFiles,
-          });
-        } catch (e) {
-          console.warn(`[moxy] bridge inject failed for ${tab.url} — ${e instanceof Error ? e.message : String(e)}`);
-        }
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['bridge.js'],
+          world: 'ISOLATED',
+          injectImmediately: true,
+        });
+      } catch (e) {
+        console.warn(
+          `[moxy] bridge inject failed for ${tab.url} — ${e instanceof Error ? e.message : String(e)}`
+        );
       }
     })
   );
@@ -130,30 +182,148 @@ async function runMigration(): Promise<void> {
 
 async function bootSequence(): Promise<void> {
   await runMigration();
-  await registerPatchScript();
+  await syncContentScriptRegistration();
   await injectIntoExistingTabs();
 }
 
+// ---------- top-level lifecycle handlers ----------
+// Service workers wake/sleep; listener registration MUST be at module top level
+// to re-bind on every wake.
+
 chrome.runtime.onInstalled.addListener(() => void bootSequence());
-chrome.runtime.onStartup.addListener(async () => {
-  // Tab IDs recycle across browser restarts. Auto-attaching a scenario to
-  // whatever inherits a recycled tabId would be surprising — clear active
-  // state and let users reload scenarios explicitly. Also GC any ephemeral
-  // "Untitled (DevTools)" scenarios left over from last session.
-  await withWriteLock(STORAGE_KEY_ACTIVE, async () => {
-    await clearAllActive(storageAdapter);
-  });
-  await withWriteLock(STORAGE_KEY_SCENARIOS, async () => {
-    const removed = await gcEphemeralScenarios(storageAdapter);
-    if (removed > 0) console.log(`[moxy] gc'd ${removed} ephemeral scenarios from prior session`);
-  });
-  await bootSequence();
+
+chrome.runtime.onStartup.addListener(() => {
+  void (async () => {
+    // Tab IDs recycle across browser restarts. Auto-attaching a scenario to
+    // whatever inherits a recycled tabId would be surprising — clear active
+    // state and let users reload scenarios explicitly. Also GC any ephemeral
+    // "Untitled (DevTools)" scenarios left over from last session.
+    await withWriteLock(STORAGE_KEY_ACTIVE, async () => {
+      await clearAllActive(storageAdapter);
+    });
+    await withWriteLock(STORAGE_KEY_SCENARIOS, async () => {
+      const removed = await gcEphemeralScenarios(storageAdapter);
+      if (removed > 0) console.log(`[moxy] gc'd ${removed} ephemeral scenarios from prior session`);
+    });
+    await bootSequence();
+  })();
 });
 void bootSequence();
 
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch((e) => console.error('[moxy] sidePanel behavior', e));
+
+// ---------- permission grant / revoke ----------
+
+chrome.permissions.onAdded.addListener((permissions) => {
+  void (async () => {
+    await syncContentScriptRegistration();
+    // Inject into matching open tabs so the user doesn't have to reload to
+    // see captures (modulo the document_start race, which we surface as a
+    // toast in DevTools).
+    await injectIntoExistingTabs();
+    notifyPanel({ kind: 'panel:permissions-changed', added: permissions.origins ?? [] });
+  })();
+});
+
+chrome.permissions.onRemoved.addListener((permissions) => {
+  void (async () => {
+    await syncContentScriptRegistration();
+    // Clean up moxy:active entries whose tab origins are no longer granted.
+    // Live patches in already-running tabs are caught by safeRuntime() on
+    // next fetch — they pass through real responses.
+    await cleanupActiveForRevoked(permissions.origins ?? []);
+    notifyPanel({ kind: 'panel:permissions-changed', removed: permissions.origins ?? [] });
+  })();
+});
+
+async function cleanupActiveForRevoked(revokedOrigins: string[]): Promise<void> {
+  if (revokedOrigins.length === 0) return;
+  const tabs = await chrome.tabs.query({});
+  const tabUrlById = new Map<number, string>();
+  for (const t of tabs) if (t.id && t.url) tabUrlById.set(t.id, t.url);
+
+  await withWriteLock(STORAGE_KEY_ACTIVE, async () => {
+    const active =
+      ((await chrome.storage.local.get(STORAGE_KEY_ACTIVE))[STORAGE_KEY_ACTIVE] as
+        | Record<number, string>
+        | undefined) ?? {};
+    let changed = false;
+    for (const tabIdStr of Object.keys(active)) {
+      const tabId = Number(tabIdStr);
+      const url = tabUrlById.get(tabId);
+      // If the tab is gone OR we no longer have permission for its origin,
+      // drop the active entry.
+      if (!url) {
+        delete active[tabId];
+        changed = true;
+        continue;
+      }
+      let stillGranted = false;
+      try {
+        stillGranted = await chrome.permissions.contains({ origins: [url] });
+      } catch {
+        stillGranted = false;
+      }
+      if (!stillGranted) {
+        delete active[tabId];
+        changed = true;
+      }
+    }
+    if (changed) await chrome.storage.local.set({ [STORAGE_KEY_ACTIVE]: active });
+  });
+}
+
+// ---------- roster (side panel) ----------
+
+// Joins moxy:active (per-tab scenario), the scenarios map, and the open-tab
+// list into a roster of "tabs currently mocking." Filters out tabs whose
+// origin isn't granted (defensive — cleanupActiveForRevoked should keep
+// moxy:active in sync, but a missed event would otherwise leak stale rows).
+async function buildRoster(): Promise<RosterRow[]> {
+  const [tabs, scenariosArr, activeObj] = await Promise.all([
+    chrome.tabs.query({}),
+    listScenarios(storageAdapter),
+    chrome.storage.local.get(STORAGE_KEY_ACTIVE),
+  ]);
+  const active = (activeObj[STORAGE_KEY_ACTIVE] as Record<number, string> | undefined) ?? {};
+  const scenariosById = new Map(scenariosArr.map((s) => [s.id, s]));
+
+  const rows: RosterRow[] = [];
+  for (const tab of tabs) {
+    if (!tab.id || !tab.url || tab.windowId == null) continue;
+    const scenarioId = active[tab.id];
+    if (!scenarioId) continue;
+    const scenario = scenariosById.get(scenarioId);
+    if (!scenario) continue;
+    let granted = false;
+    try {
+      granted = await chrome.permissions.contains({ origins: [tab.url] });
+    } catch {
+      granted = false;
+    }
+    if (!granted) continue;
+
+    let origin: string;
+    try {
+      origin = new URL(tab.url).origin;
+    } catch {
+      continue;
+    }
+
+    rows.push({
+      tabId: tab.id,
+      windowId: tab.windowId,
+      origin,
+      scenarioId,
+      scenarioName: scenario.name,
+      ruleCount: scenario.rules.length,
+      enabledRuleCount: scenario.rules.filter((r) => r.enabled).length,
+    });
+  }
+  return rows;
+}
 
 // ---------- captures + global toggle ----------
 
@@ -427,6 +597,12 @@ async function handleMessage(
     case 'sw:get-active-scenario': {
       const scenarioId = await getActiveScenarioIdForTab(storageAdapter, msg.tabId);
       return { ok: true, data: { scenarioId } };
+    }
+
+    // ---- side panel roster (v1.3) ----
+    case 'sw:list-roster': {
+      const rows = await buildRoster();
+      return { ok: true, data: rows };
     }
 
     default:

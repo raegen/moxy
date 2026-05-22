@@ -2,6 +2,24 @@
 
 All notable changes to moxy are documented here. Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v1.3.0 — 2026-05-22
+
+### Changed
+- **Permissions are now granted per-site at runtime, not all-sites at install.** `host_permissions: ["<all_urls>"]` → `optional_host_permissions: ["<all_urls>"]`. Chrome's install dialog no longer shows the "Read your data on all websites" warning — only "Read your browsing history" (from the `tabs` permission) remains.
+- **DevTools panel auto-requests host permission on first mount per inspected origin.** Click the moxy tab in DevTools → Chrome's per-site permission prompt appears → grant once, mock thereafter. If the user gesture window expires before the request fires, a `Grant access to {host}` button banner is the fallback.
+- **Side panel reshaped as cross-tab mission control.** No longer mirrors the DevTools panel UI. Two pieces of UI total: global ON/OFF kill switch + a roster of tabs currently mocking, with `switch ▸` click-to-focus per row. Scenario management stays in DevTools where the capture→mutate→save flow lives.
+
+### Added
+- Content scripts (patch + bridge) registered programmatically and scoped to currently-granted origins. The registration syncs on every `chrome.permissions.onAdded` / `onRemoved`. Static `content_scripts` declaration removed from the manifest.
+- `chrome.permissions.onRemoved` cleans up `moxy:active` entries whose tab origins are no longer granted.
+- `panel:permissions-changed` SW broadcast keeps the side panel roster and DevTools panel gate in sync with permission state.
+- `sw:list-roster` SW message joins `moxy:active` + scenarios + open tabs + per-tab permission check into a single payload for the side panel.
+- `RosterRow` type in `src/shared/types.ts`.
+
+### Removed
+- `panel-shared/` no longer holds Preact components — only `panel.css`. The DevTools-only components (`App`, `MutateDrawer`, `ScenarioBar`, `ScenariosTab`, `TabContext`) moved to `src/devtools/panel/`. New side panel lives at `src/side-panel/`.
+- Side panel's `captures` / `rules` / `scenarios` tabs — that surface is the DevTools panel's job now.
+
 ## v1.2.0 — 2026-05-22
 
 ### Added

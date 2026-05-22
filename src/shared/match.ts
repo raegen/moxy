@@ -1,50 +1,46 @@
 // URL pattern matching + matcher dispatch.
 //
-// Uses URLPattern when the runtime exposes it (Chrome 95+), falling back to a
-// glob-to-regex shim. The dispatch on Matcher.type uses a `default: never` cast
-// so any future matcher type added to types.ts forces this file to compile-fail
-// until a case is added. Catches v1.2 regressions at build time, not at runtime.
+// Uses picomatch — the same glob library Vite, Vitest, and esbuild rely on.
+// `*` matches a single non-slash run (a host, a path segment), `**` matches
+// any run including slashes. The dispatch on Matcher.type uses a `default:
+// never` cast so any future matcher variant forces this file to compile-fail
+// until a case is added.
 
+import picomatch from 'picomatch';
 import type { Matcher } from './types';
 
-type URLPatternLike = new (init: string | object) => { test(url: string): boolean };
+// One compiled matcher per pattern. Patterns are stable (they live in the
+// scenario file), so cache hits dominate after the first capture.
+const matcherCache = new Map<string, (s: string) => boolean>();
 
 export function urlMatches(pattern: string, url: string): boolean {
   if (!pattern) return false;
-  // Native URLPattern: handles ://, host, path, query naturally.
-  const URLPatternCtor = (globalThis as { URLPattern?: URLPatternLike }).URLPattern;
-  if (typeof URLPatternCtor === 'function') {
-    try {
-      return new URLPatternCtor(pattern).test(url);
-    } catch {
-      // Pattern wasn't a valid URLPattern (e.g. user-friendly globs). Fall through.
-    }
-  }
-  return globToRegex(pattern).test(url);
-}
 
-function globToRegex(glob: string): RegExp {
-  // Convert a minimatch-ish glob into a regex. ** = any chars including /, * = any except /
-  let out = '^';
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
-    if (c === '*') {
-      if (glob[i + 1] === '*') {
-        out += '.*';
-        i++;
-      } else {
-        out += '[^/]*';
-      }
-    } else if (c === '?') {
-      out += '[^/]';
-    } else if (/[\\^$.|+()[\]{}]/.test(c)) {
-      out += '\\' + c;
-    } else {
-      out += c;
-    }
+  // URLPattern-style semantics: parts the pattern doesn't specify are wildcarded.
+  // If the user typed a bare endpoint URL with no `?` or `#`, they want it to
+  // match the URL regardless of query string or hash fragment. Strip the
+  // corresponding pieces from the URL before handing it to picomatch.
+  let target = url;
+  if (!pattern.includes('?')) {
+    const i = target.indexOf('?');
+    if (i !== -1) target = target.slice(0, i);
   }
-  out += '$';
-  return new RegExp(out);
+  if (!pattern.includes('#')) {
+    const i = target.indexOf('#');
+    if (i !== -1) target = target.slice(0, i);
+  }
+
+  let m = matcherCache.get(pattern);
+  if (!m) {
+    // Pre-escape '?' so a pattern that DOES include a query separator matches
+    // it literally rather than treating '?' as picomatch's single-char wildcard.
+    // URLs also commonly contain literal '{}' and '()' in query payloads, so
+    // we disable brace expansion and extglob.
+    const safe = pattern.replace(/\?/g, '\\?');
+    m = picomatch(safe, { nobrace: true, noext: true, dot: true });
+    matcherCache.set(pattern, m);
+  }
+  return m(target);
 }
 
 export function methodMatches(rulMethod: string, requestMethod: string): boolean {

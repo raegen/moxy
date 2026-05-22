@@ -139,7 +139,21 @@ export type SwMessage =
   | { kind: 'sw:delete-scenario'; scenarioId: string }
   | { kind: 'sw:load-scenario'; scenarioId: string; tabId: number }
   | { kind: 'sw:unload-scenario'; tabId: number }
-  | { kind: 'sw:get-active-scenario'; tabId: number };
+  | { kind: 'sw:get-active-scenario'; tabId: number }
+  // v1.3 — side panel roster
+  | { kind: 'sw:list-roster' };
+
+// Roster row — the side panel's view of one currently-mocked tab. Computed by
+// joining moxy:active, the scenarios map, and the open-tab list.
+export type RosterRow = {
+  tabId: number;
+  windowId: number;
+  origin: string;
+  scenarioId: string;
+  scenarioName: string;
+  ruleCount: number;
+  enabledRuleCount: number;
+};
 
 export type SwResponse =
   | { ok: true; data?: unknown }
@@ -147,5 +161,5 @@ export type SwResponse =
 
 export const MOXY_MARKER = '__moxy_v1__';
 export const MOXY_FORMAT_VERSION = 1 as const;
-export const MOXY_EXTENSION_VERSION = '1.1.0';
+export const MOXY_EXTENSION_VERSION = '1.3.0';
 export const SCHEMA_URL = 'https://raw.githubusercontent.com/raegen/moxy/v1.1.0/schema/v1.json';
