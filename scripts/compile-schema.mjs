@@ -52,6 +52,41 @@ if (/^module\.exports\s*=/m.test(code) && !/^export default/m.test(code)) {
   code = code.replace(/module\.exports\s*=\s*([^;]+);?/, 'export default $1;');
 }
 
+// `esm: true` doesn't convert ajv's runtime-helper `require()` calls — only the
+// module's export form. Helpers like `ucs2length` (used by minLength/maxLength
+// on strings, handles surrogate pairs) and `ajv-formats`'s format regexes are
+// emitted as `const x = require("...").default` lines. In an MV3 panel /
+// service-worker context `require` is undefined, so the bundle crashes on
+// first use ("ReferenceError: require is not defined"). Convert to real ESM
+// imports so Vite/Rollup can inline the helpers during the panel bundle.
+const requireImports = new Set();
+code = code.replace(
+  /const\s+(\w+)\s*=\s*require\("([^"]+)"\)\.default\s*;?/g,
+  (_m, name, modPath) => {
+    requireImports.add(`import ${name} from "${modPath}";`);
+    return '';
+  }
+);
+code = code.replace(
+  /const\s+(\w+)\s*=\s*require\("([^"]+)"\)\.(\w+)([^\n;]*);?/g,
+  (_m, name, modPath, exportName, tail) => {
+    // `const L = require("ajv-formats/dist/formats").fastFormats["date-time"]`
+    // → import { fastFormats } from "ajv-formats/dist/formats"; const L = fastFormats["date-time"];
+    requireImports.add(`import { ${exportName} } from "${modPath}";`);
+    return `const ${name} = ${exportName}${tail};`;
+  }
+);
+
+// Bail if any unrewritten require() survives — would crash at runtime, better
+// to fail the build than to ship a broken validator.
+if (/\brequire\s*\(/.test(code)) {
+  console.error('[moxy] ERROR: unrewritten require() call found in standalone validator:');
+  console.error(code.match(/[^\n]*\brequire\s*\([^\n]*/g)?.join('\n'));
+  process.exit(1);
+}
+
+code = [...requireImports].join('\n') + '\n' + code;
+
 fs.mkdirSync(outDir, { recursive: true });
 fs.writeFileSync(outPath, code, 'utf-8');
 
