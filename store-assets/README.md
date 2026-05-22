@@ -19,7 +19,7 @@ Both regenerate via `bun run build:icons`.
   3. The scenario library tab with 2-3 example scenarios
   4. A `.moxy.json` file open next to the panel that just loaded it
   5. The ON/OFF pill demonstrating the global kill switch
-- **Detailed description** — up to 16,000 chars of HTML for the listing body. Draft below in `listing-copy.md` (TODO).
+- **Detailed description** — up to 16,000 chars of HTML for the listing body. Drafted in `listing-copy.md` alongside every permission justification and field copy.
 - **Privacy policy URL** — point to `https://github.com/raegen/moxy/blob/main/PRIVACY.md` until there's a project website.
 - **Category** — Developer Tools.
 
