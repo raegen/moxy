@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- moxy icon
+       Dark rounded square + lowercase 'm' in ultraviolet.
+       Source of truth — regenerate PNGs via `bun run build:icons`.
+
+       Text-based 'm' for cleaner rendering than path approximations.
+       resvg-js loads system fonts; the committed PNGs are the artifact
+       of record, so font availability only matters at generation time. -->
+
+  <rect width="128" height="128" rx="22" fill="#0f1115"/>
+
+  <text
+    x="64"
+    y="102"
+    text-anchor="middle"
+    font-family="SF Pro Display, -apple-system, BlinkMacSystemFont, Inter, Helvetica Neue, Helvetica, Arial, sans-serif"
+    font-size="124"
+    font-weight="800"
+    fill="#8b5cf6"
+  >m</text>
+</svg>
