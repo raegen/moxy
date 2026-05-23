@@ -18,9 +18,4 @@ describe('DevToolsPanelHost smoke test', () => {
     expect(await screen.findByRole('button', { name: /rules/i })).toBeTruthy();
     expect(await screen.findByRole('button', { name: /scenarios/i })).toBeTruthy();
   });
-
-  it('passes the provided tab id through TabContext (shown in header badge)', async () => {
-    render(<DevToolsPanelHost tabId={42} />);
-    expect(await screen.findByText(/tab 42/i)).toBeTruthy();
-  });
 });

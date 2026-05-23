@@ -2,6 +2,25 @@
 
 All notable changes to moxy are documented here. Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
+## v1.3.1 — 2026-05-22
+
+### Changed
+- **Auto-created scenario names now come from the inspected page.** The first rule you save in a tab with no active scenario creates an ephemeral scenario named `{pageTitle} — {hostname}` (e.g. `GitHub — github.com`) instead of `Untitled (DevTools) — tab 1111726977`. Falls back to hostname, then title, then `Untitled scenario` when nothing's available.
+- **Auto-created scenarios no longer carry the misleading "Rename to keep" description.** That string promised rename UI that didn't exist.
+
+### Added
+- **Inline rename + description editing** in the scenario library. Double-click a scenario's name or description in the DevTools panel to edit. Enter saves, Esc cancels. Names can't be empty; descriptions can.
+- **Drag-to-export** scenarios. Drag a scenario row out of the DevTools panel into Finder/Explorer to drop a `.moxy.json` file. Drag into a text editor or chat window to paste the raw JSON. The existing Export button stays.
+- **Logo in the panel headers.** Both DevTools and side panel now show the moxy mark next to the brand name. Reuses `icons/moxy-24.png` rendered at 16×16.
+
+### Removed
+- `EPHEMERAL_NAME_PREFIX` — ephemeral detection now keys off the scenario id prefix (`s_eph_t*`) so user-renamed scenarios still survive GC correctly.
+
+### UI polish
+- **DevTools header decluttered.** Removed the `N/M active` badge and the `tab N` badge (the latter was a leftover from when the side panel mirrored DevTools and needed to disambiguate tabs). Disabled-rules signal folded into the `rules` tab pill — shows `N/M` only when some rules are toggled off.
+- **`Clear` button moved.** Was in the header, now lives in a small toolbar above the capture list (`N captures` on the left, `clear` on the right). Toolbar only renders when there's something to clear.
+- **ON/OFF moved to the right side of both headers.** Brand reads as one unit on the left (`[logo] moxy`); kill switch lives on the right where browsers and IDEs conventionally place controls.
+
 ## v1.3.0 — 2026-05-22
 
 ### Changed

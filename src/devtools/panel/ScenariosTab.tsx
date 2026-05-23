@@ -1,6 +1,7 @@
 import { useState } from 'preact/hooks';
 import type { Scenario, SwResponse } from '../../shared/types';
 import { parseScenario, serializeScenario, ScenarioImportError } from '../../shared/scenario';
+import { EditableField } from './EditableField';
 
 type Props = {
   scenarios: Scenario[];
@@ -133,6 +134,35 @@ export function ScenariosTab({ scenarios, activeScenarioId, tabId, onChanged }: 
     onChanged();
   };
 
+  const updateScenarioField = async (s: Scenario, patch: Partial<Pick<Scenario, 'name' | 'description'>>) => {
+    const updated: Scenario = { ...s, ...patch };
+    await send({ kind: 'sw:save-scenario', scenario: updated });
+    onChanged();
+  };
+
+  // Drag-to-filesystem export. Chrome materializes the drop as a real file
+  // when the `DownloadURL` DataTransfer type is set (`mime:filename:url`).
+  // We also expose application/json + text/plain so dragging into an editor
+  // or chat window pastes the raw scenario JSON.
+  const onScenarioDragStart = (s: Scenario, e: DragEvent) => {
+    if (!e.dataTransfer) return;
+    const json = serializeScenario(s);
+    const filename = `${sanitizeFilename(s.name)}.moxy.json`;
+    const blob = new Blob([json], { type: 'application/json' });
+    const blobUrl = URL.createObjectURL(blob);
+    // Release the blob URL after the drag completes (or aborts).
+    const cleanup = () => {
+      URL.revokeObjectURL(blobUrl);
+      (e.target as HTMLElement)?.removeEventListener('dragend', cleanup);
+    };
+    (e.target as HTMLElement)?.addEventListener('dragend', cleanup);
+
+    e.dataTransfer.effectAllowed = 'copy';
+    e.dataTransfer.setData('DownloadURL', `application/json:${filename}:${blobUrl}`);
+    e.dataTransfer.setData('application/json', json);
+    e.dataTransfer.setData('text/plain', json);
+  };
+
   return (
     <div class="scenarios-tab">
       <section class="scenarios-import">
@@ -199,12 +229,27 @@ export function ScenariosTab({ scenarios, activeScenarioId, tabId, onChanged }: 
             {scenarios.map((s) => {
               const isActive = s.id === activeScenarioId;
               return (
-                <li key={s.id} class={'scenario-row' + (isActive ? ' active' : '')}>
+                <li
+                  key={s.id}
+                  class={'scenario-row' + (isActive ? ' active' : '')}
+                  draggable
+                  onDragStart={(e) => onScenarioDragStart(s, e)}
+                  title="drag to export as .moxy.json"
+                >
                   <div class="scenario-row-main">
-                    <span class="scenario-row-name">{s.name}</span>
-                    {s.description && (
-                      <span class="scenario-row-desc">{s.description}</span>
-                    )}
+                    <EditableField
+                      className="scenario-row-name"
+                      value={s.name}
+                      onSave={(next) => void updateScenarioField(s, { name: next })}
+                      allowEmpty={false}
+                    />
+                    <EditableField
+                      className="scenario-row-desc"
+                      value={s.description ?? ''}
+                      onSave={(next) => void updateScenarioField(s, { description: next })}
+                      placeholder="add description…"
+                      multiline
+                    />
                     <span class="scenario-row-meta">
                       {s.rules.length} rule{s.rules.length === 1 ? '' : 's'}
                       {isActive ? ' · active in this tab' : ''}

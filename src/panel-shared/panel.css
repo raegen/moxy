@@ -738,3 +738,63 @@ main.moxy-body {
   background: rgba(251, 191, 36, 0.05);
   text-align: center;
 }
+
+/* v1.3.1 — brand mark in panel headers + editable scenario fields */
+
+.moxy-logo {
+  vertical-align: middle;
+  margin: 0 6px 0 0;
+  flex: 0 0 16px;
+}
+
+.editable-field {
+  cursor: text;
+  border-radius: 3px;
+  padding: 1px 3px;
+  margin: -1px -3px; /* visually identical bounding box to the static span */
+}
+.editable-field:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.editable-field.empty {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+.editable-field.editing {
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  outline: none;
+  font: inherit;
+  color: inherit;
+  width: 100%;
+  resize: vertical;
+}
+input.editable-field.editing,
+textarea.editable-field.editing {
+  display: block;
+  box-sizing: border-box;
+  padding: 4px 6px;
+}
+
+/* Draggable scenario rows — subtle affordance on hover */
+.scenario-row[draggable="true"] {
+  cursor: grab;
+}
+.scenario-row[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+/* v1.3.2 — capture toolbar (replaces the header `clear` button) */
+.capture-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.capture-toolbar-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+}

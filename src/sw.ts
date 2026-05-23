@@ -466,9 +466,19 @@ async function handleMessage(
       const tabId = msg.rule.tabId;
       const { tabId: _, ...ruleWithoutTabId } = msg.rule;
       void _;
+      // Fetch tab metadata so an auto-created ephemeral scenario gets a
+      // human-friendly name. Best-effort — if the lookup fails we still
+      // save the rule, the scenario just gets the "Untitled scenario" fallback.
+      let tabMeta: { title?: string; url?: string } | undefined;
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        tabMeta = { title: tab.title, url: tab.url };
+      } catch {
+        /* tab vanished mid-edit; fall through */
+      }
       let scenarioId: string | undefined;
       await withWriteLock(STORAGE_KEY_SCENARIOS, async () => {
-        const r = await saveRuleInActiveScenario(storageAdapter, tabId, ruleWithoutTabId);
+        const r = await saveRuleInActiveScenario(storageAdapter, tabId, ruleWithoutTabId, tabMeta);
         scenarioId = r.scenarioId;
         if (r.created) {
           // Created an ephemeral scenario — also update active map.
