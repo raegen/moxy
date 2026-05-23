@@ -10,11 +10,17 @@
 
 import type { Rule, Scenario } from './types';
 import type { StorageAdapter } from './migrate';
+import { deriveScenarioName } from './scenario-name';
 
 export const STORAGE_KEY_SCENARIOS = 'moxy:scenarios';
 export const STORAGE_KEY_ACTIVE = 'moxy:active';
 
-const EPHEMERAL_NAME_PREFIX = 'Untitled (DevTools)';
+// Ephemeral scenarios — auto-created on first rule-save in a tab with no
+// active scenario — share a stable id prefix. The GC and "is this ephemeral?"
+// check both key off the id, not the name. Names are derived from the page
+// title and editable by the user; relying on a name marker would break the
+// moment a user renames their scenario.
+const EPHEMERAL_ID_PREFIX = 's_eph_t';
 
 // ---------- scenarios ----------
 
@@ -121,12 +127,17 @@ export async function getRulesForTab(storage: StorageAdapter, tabId: number): Pr
 // ---------- rule edits via scenarios ----------
 
 // Save a rule for the active scenario in a tab. If no scenario is active,
-// create an ephemeral one ("Untitled (DevTools)") and activate it. Replaces
-// an existing rule with the same id; otherwise appends.
+// create an ephemeral one (named from the tab's page title) and activate it.
+// Replaces an existing rule with the same id; otherwise appends.
+//
+// `tabMeta` is optional — when present (SW caller passes it), the ephemeral
+// gets a human-readable name like "GitHub — github.com" instead of falling
+// back to "Untitled scenario."
 export async function saveRuleInActiveScenario(
   storage: StorageAdapter,
   tabId: number,
-  rule: Omit<Rule, 'tabId'>
+  rule: Omit<Rule, 'tabId'>,
+  tabMeta?: { title?: string; url?: string }
 ): Promise<{ scenarioId: string; created: boolean }> {
   const existingId = await getActiveScenarioIdForTab(storage, tabId);
   let scenarioId: string;
@@ -140,12 +151,12 @@ export async function saveRuleInActiveScenario(
     scenarioId = scenario.id;
   } else {
     // Ephemeral. Stable id per tab so re-creating doesn't pile up duplicates.
-    scenarioId = `s_eph_t${tabId}`;
+    scenarioId = `${EPHEMERAL_ID_PREFIX}${tabId}`;
     scenario = {
       id: scenarioId,
       moxyFormatVersion: 1,
-      name: `${EPHEMERAL_NAME_PREFIX} — tab ${tabId}`,
-      description: 'Auto-created when editing a rule with no active scenario. Rename to keep.',
+      name: deriveScenarioName(tabMeta?.title, tabMeta?.url),
+      description: '',
       createdAt: Date.now(),
       rules: [],
     };
@@ -196,7 +207,8 @@ export async function toggleRuleInActiveScenario(
 
 // Garbage-collect ephemeral scenarios that are not active in any tab. Called
 // on browser startup (paired with clearAllActive) so leftover ephemerals from
-// previous sessions don't pile up.
+// previous sessions don't pile up. Detection keys off the scenario id prefix,
+// not the name — names are user-editable now.
 export async function gcEphemeralScenarios(storage: StorageAdapter): Promise<number> {
   const raw =
     ((await storage.get(STORAGE_KEY_SCENARIOS)) as Record<string, Scenario> | undefined) ?? {};
@@ -204,8 +216,8 @@ export async function gcEphemeralScenarios(storage: StorageAdapter): Promise<num
     ((await storage.get(STORAGE_KEY_ACTIVE)) as Record<number, string> | undefined) ?? {};
   const activeIds = new Set(Object.values(active));
   let removed = 0;
-  for (const [id, sc] of Object.entries(raw)) {
-    if (sc.name.startsWith(EPHEMERAL_NAME_PREFIX) && !activeIds.has(id)) {
+  for (const id of Object.keys(raw)) {
+    if (id.startsWith(EPHEMERAL_ID_PREFIX) && !activeIds.has(id)) {
       delete raw[id];
       removed++;
     }

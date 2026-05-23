@@ -73,6 +73,11 @@ export function SidePanelApp() {
     <>
       <header class="moxy-head">
         <div class="head-left">
+          <img class="moxy-logo" src={chrome.runtime.getURL('icons/moxy-24.png')} alt="" width={16} height={16} />
+          <h1>moxy</h1>
+          <span class="badge">{rows.length} active</span>
+        </div>
+        <div class="head-right">
           <label
             class="global-toggle"
             title={globalEnabled ? 'click to disable all mocking' : 'click to enable mocking'}
@@ -82,10 +87,6 @@ export function SidePanelApp() {
               {globalEnabled ? 'ON' : 'OFF'}
             </span>
           </label>
-          <h1>moxy</h1>
-        </div>
-        <div class="head-right">
-          <span class="badge">{rows.length} active</span>
         </div>
       </header>
 

@@ -22,6 +22,7 @@ const chromeStub = {
     onInstalled: { addListener: vi.fn() },
     onStartup: { addListener: vi.fn() },
     getManifest: vi.fn().mockReturnValue({ content_scripts: [] }),
+    getURL: vi.fn((path: string) => `chrome-extension://test/${path}`),
   },
   tabs: {
     query: vi.fn().mockResolvedValue([{ id: 1, url: 'https://example.com' }]),

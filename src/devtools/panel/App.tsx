@@ -137,22 +137,16 @@ export function App() {
     <>
       <header class="moxy-head">
         <div class="head-left">
+          <img class="moxy-logo" src={chrome.runtime.getURL('icons/moxy-24.png')} alt="" width={16} height={16} />
+          <h1>moxy</h1>
+        </div>
+        <div class="head-right">
           <label class="global-toggle" title={globalEnabled ? 'click to disable all mocking' : 'click to enable mocking'}>
             <input type="checkbox" checked={globalEnabled} onChange={toggleGlobal} />
             <span class={'pill' + (globalEnabled ? ' on' : ' off')}>
               {globalEnabled ? 'ON' : 'OFF'}
             </span>
           </label>
-          <h1>moxy</h1>
-        </div>
-        <div class="head-right">
-          <span class="badge">
-            {enabledRulesCount}/{rules.length} active
-          </span>
-          <span class="badge">{tabId !== null ? `tab ${tabId}` : 'no tab'}</span>
-          <button class="btn-sm" onClick={clear} disabled={captures.length === 0}>
-            clear
-          </button>
         </div>
       </header>
 
@@ -178,7 +172,12 @@ export function App() {
           class={'tab' + (activeTab === 'rules' ? ' active' : '')}
           onClick={() => setActiveTab('rules')}
         >
-          rules <span class="count">{rules.length}</span>
+          rules{' '}
+          <span class="count">
+            {enabledRulesCount < rules.length
+              ? `${enabledRulesCount}/${rules.length}`
+              : rules.length}
+          </span>
         </button>
         <button
           class={'tab' + (activeTab === 'scenarios' ? ' active' : '')}
@@ -197,33 +196,43 @@ export function App() {
               Open a page that uses fetch, then reload that page.
             </div>
           ) : (
-            <ul class="capture-list">
-              {captures
-                .slice()
-                .reverse()
-                .map((c) => (
-                  <li
-                    key={c.id}
-                    class={'capture-row' + (c.mocked ? ' mocked' : '')}
-                    onClick={() => setSelectedCapture(c)}
-                  >
-                    <span class="cap-method">{c.request.method}</span>
-                    <span
-                      class="cap-status"
-                      style={{ color: statusColor(c.response.status) }}
+            <>
+              <div class="capture-toolbar">
+                <span class="capture-toolbar-count">
+                  {captures.length} capture{captures.length === 1 ? '' : 's'}
+                </span>
+                <button class="btn-sm" onClick={clear}>
+                  clear
+                </button>
+              </div>
+              <ul class="capture-list">
+                {captures
+                  .slice()
+                  .reverse()
+                  .map((c) => (
+                    <li
+                      key={c.id}
+                      class={'capture-row' + (c.mocked ? ' mocked' : '')}
+                      onClick={() => setSelectedCapture(c)}
                     >
-                      {c.response.status}
-                    </span>
-                    <span class="cap-url" title={c.request.url}>
-                      {shortUrl(c.request.url)}
-                    </span>
-                    <span class="cap-dur">
-                      {c.mocked ? 'MOCK ' : ''}
-                      {c.durationMs}ms
-                    </span>
-                  </li>
-                ))}
-            </ul>
+                      <span class="cap-method">{c.request.method}</span>
+                      <span
+                        class="cap-status"
+                        style={{ color: statusColor(c.response.status) }}
+                      >
+                        {c.response.status}
+                      </span>
+                      <span class="cap-url" title={c.request.url}>
+                        {shortUrl(c.request.url)}
+                      </span>
+                      <span class="cap-dur">
+                        {c.mocked ? 'MOCK ' : ''}
+                        {c.durationMs}ms
+                      </span>
+                    </li>
+                  ))}
+              </ul>
+            </>
           ))}
 
         {activeTab === 'rules' &&
