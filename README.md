@@ -8,24 +8,9 @@
 
 Chrome DevTools' "Local Overrides" can change response bodies but not status codes. moxy fills the gap: intercept your page's `fetch` and `XMLHttpRequest` calls, snapshot the real response, mutate any part of it, save the rule into a **scenario**, share that scenario as a `.moxy.json` file. Attach a broken state to a bug report. Reproduce a teammate's edge case in one click.
 
-> Status: v1.3.0 — per-site `optional_host_permissions` + slim side panel. Chrome Web Store submission is the next step.
-
 ## Install
 
-### From source (today)
-
-```bash
-git clone https://github.com/raegen/moxy
-cd moxy
-bun install
-bun run build
-```
-
-Then in Chrome: `chrome://extensions` → enable Developer mode → **Load unpacked** → select the `dist/` folder.
-
-### From Chrome Web Store
-
-Coming soon. See `store-assets/README.md` for the submission checklist.
+[moxy](https://chromewebstore.google.com/detail/hilainlbpdobjmhgapokojiipniihbbi?utm_source=item-share-cb)
 
 ## Usage
 
