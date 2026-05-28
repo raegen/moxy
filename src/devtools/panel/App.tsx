@@ -1,16 +1,23 @@
 import { useEffect, useState, useCallback, useMemo } from 'preact/hooks';
 import type { Capture, Rule, Scenario, SwResponse } from '../../shared/types';
+import { createDebug } from '../../shared/debug';
 import { MutateDrawer } from './MutateDrawer';
 import { ScenarioBar } from './ScenarioBar';
 import { ScenariosTab } from './ScenariosTab';
 import { useTabId } from './TabContext';
 
+const dbg = createDebug('dt');
+
 async function send<T = unknown>(msg: unknown): Promise<T | null> {
+  const kind = (msg as { kind?: string })?.kind;
+  dbg('send', kind);
   try {
     const res = (await chrome.runtime.sendMessage(msg)) as SwResponse;
+    dbg('send reply', kind, res);
     if (res?.ok) return (res.data ?? null) as T | null;
     return null;
-  } catch {
+  } catch (e) {
+    dbg('send threw', kind, e);
     return null;
   }
 }
@@ -75,9 +82,12 @@ export function App() {
       enabled?: boolean;
     }) => {
       if (!msg?.kind) return;
+      dbg('recv', msg.kind, 'for tab', tabId);
       if (msg.kind === 'panel:capture-added') {
         if (msg.capture && msg.capture.tabId === tabId) {
           setCaptures((prev) => [...prev, msg.capture!]);
+        } else {
+          dbg('capture filtered out', { msgTab: msg.capture?.tabId, ourTab: tabId });
         }
       } else if (msg.kind === 'panel:captures-cleared') {
         if (msg.tabId == null || msg.tabId === tabId) setCaptures([]);

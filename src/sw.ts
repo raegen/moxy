@@ -14,6 +14,9 @@
 import type { Capture, RosterRow, Scenario, SwMessage, SwResponse } from './shared/types';
 import { migrateV1ToV11, chromeStorageAdapter } from './shared/migrate';
 import { withWriteLock } from './shared/storage';
+import { createDebug } from './shared/debug';
+
+const dbg = createDebug('sw');
 import {
   STORAGE_KEY_SCENARIOS,
   STORAGE_KEY_ACTIVE,
@@ -180,10 +183,28 @@ async function runMigration(): Promise<void> {
   });
 }
 
+// Drop the legacy moxy:captures blob from chrome.storage.local. Pre-v1.3.2
+// stored captures there; v1.3.2 moved them to .session. Existing users would
+// otherwise carry forward a potentially-massive stale value that eats into
+// their .local quota forever (and bricks every other .local write once full).
+async function purgeLegacyCapturesFromLocal(): Promise<void> {
+  try {
+    await chrome.storage.local.remove(STORAGE_KEY_CAPTURES);
+  } catch (e) {
+    console.warn('[moxy] legacy captures purge failed', e);
+  }
+}
+
 async function bootSequence(): Promise<void> {
+  dbg('boot: migration');
   await runMigration();
+  dbg('boot: purge legacy captures');
+  await purgeLegacyCapturesFromLocal();
+  dbg('boot: sync content scripts');
   await syncContentScriptRegistration();
+  dbg('boot: inject into existing tabs');
   await injectIntoExistingTabs();
+  dbg('boot: done');
 }
 
 // ---------- top-level lifecycle handlers ----------
@@ -327,13 +348,19 @@ async function buildRoster(): Promise<RosterRow[]> {
 
 // ---------- captures + global toggle ----------
 
+// Captures live in chrome.storage.session (cleared on browser restart) rather
+// than .local. They're inherently ephemeral — survival across browser sessions
+// was never a feature, just a side effect of using .local — and large bodies
+// from a long-lived session can blow the 10MB QuotaBytes cap, after which
+// every appendCapture rejects with "Resource::kQuotaBytes quota exceeded" and
+// no new captures land for any tab.
 async function loadCaptures(): Promise<Capture[]> {
-  const obj = await chrome.storage.local.get(STORAGE_KEY_CAPTURES);
+  const obj = await chrome.storage.session.get(STORAGE_KEY_CAPTURES);
   return (obj[STORAGE_KEY_CAPTURES] as Capture[] | undefined) ?? [];
 }
 
 async function saveCaptures(captures: Capture[]): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEY_CAPTURES]: captures });
+  await chrome.storage.session.set({ [STORAGE_KEY_CAPTURES]: captures });
 }
 
 async function loadGlobalEnabled(): Promise<boolean> {
@@ -362,6 +389,7 @@ async function appendCapture(cap: Capture): Promise<void> {
     }
     trimmed.sort((a, b) => a.ts - b.ts);
     await saveCaptures(trimmed);
+    dbg('capture stored', { id: cap.id, tabId: cap.tabId, total: trimmed.length });
   });
   notifyPanel({ kind: 'panel:capture-added', capture: cap });
 }
@@ -369,14 +397,17 @@ async function appendCapture(cap: Capture): Promise<void> {
 // ---------- broadcasts ----------
 
 function notifyPanel(msg: unknown): void {
+  const kind = (msg as { kind?: string })?.kind;
+  dbg('notifyPanel', kind);
   chrome.runtime.sendMessage(msg).catch(() => {});
 }
 
 async function broadcastRulesToTab(tabId: number): Promise<void> {
+  dbg('broadcastRulesToTab', tabId);
   try {
     await chrome.tabs.sendMessage(tabId, { kind: 'broadcast:rules-updated' });
-  } catch {
-    /* tab has no bridge yet */
+  } catch (e) {
+    dbg('broadcastRulesToTab failed (no bridge yet?)', tabId, e);
   }
 }
 
@@ -402,9 +433,16 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 // ---------- message router ----------
 
 chrome.runtime.onMessage.addListener((msg: SwMessage & { kind: string }, sender, sendResponse) => {
+  dbg('recv', msg?.kind, 'from tab', sender.tab?.id);
   void handleMessage(msg, sender)
-    .then(sendResponse)
-    .catch((e) => sendResponse({ ok: false, error: String(e) } satisfies SwResponse));
+    .then((res) => {
+      dbg('reply', msg?.kind, res);
+      sendResponse(res);
+    })
+    .catch((e) => {
+      dbg('threw', msg?.kind, e);
+      sendResponse({ ok: false, error: String(e) } satisfies SwResponse);
+    });
   return true; // async response
 });
 

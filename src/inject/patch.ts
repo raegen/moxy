@@ -17,11 +17,18 @@ import type {
 } from '../shared/types';
 import { MOXY_MARKER } from '../shared/types';
 import { matcherMatches } from '../shared/match';
+import { createDebug } from '../shared/debug';
+
+const dbg = createDebug('patch');
 
 (() => {
   const w = window as Window & { __moxy_installed?: boolean };
-  if (w.__moxy_installed) return;
+  if (w.__moxy_installed) {
+    dbg('install skipped (already installed)');
+    return;
+  }
   w.__moxy_installed = true;
+  dbg('install', { url: location.href });
 
   // Capture the real fetch BEFORE the interceptor patches window.fetch.
   // Needed for partial-mutation mode (run the real request, override status/headers).
@@ -63,19 +70,27 @@ import { matcherMatches } from '../shared/match';
 
     if (payload.kind === 'moxy:nonce') {
       nonce = payload.nonce;
+      dbg('nonce received → handshake', nonce);
       postToBridge({ kind: 'moxy:handshake', nonce });
       return;
     }
 
     if (payload.kind === 'moxy:rules') {
-      if (nonce !== null && payload.nonce !== nonce) return;
+      if (nonce !== null && payload.nonce !== nonce) {
+        dbg('rules dropped (nonce mismatch)');
+        return;
+      }
       rules = Array.isArray(payload.rules) ? payload.rules : [];
+      dbg('rules received', { count: rules.length });
       markRulesReady();
     }
   });
 
   // Safety: if rules never arrive within 250ms, assume none and unblock.
-  setTimeout(markRulesReady, 250);
+  setTimeout(() => {
+    if (!rulesReady) dbg('rules timeout (250ms) — proceeding without');
+    markRulesReady();
+  }, 250);
 
   // ---------- helpers ----------
 
@@ -191,8 +206,12 @@ import { matcherMatches } from '../shared/match';
     if (!rulesReady) await awaitRules();
 
     const rule = findMatchingRule(request.method, request.url);
-    if (!rule) return; // passthrough — interceptor will let the real request fly
+    if (!rule) {
+      dbg('request passthrough', request.method, request.url);
+      return; // passthrough — interceptor will let the real request fly
+    }
 
+    dbg('request matched rule', { ruleId: rule.id, method: request.method, url: request.url });
     requestRule.set(requestId, rule.id);
 
     let mockedResponse: Response;
@@ -243,7 +262,10 @@ import { matcherMatches } from '../shared/match';
   });
 
   interceptor.on('response', async ({ response, request, isMockedResponse, requestId }) => {
-    if (nonce === null) return;
+    if (nonce === null) {
+      dbg('response dropped (no nonce yet)', request.method, request.url);
+      return;
+    }
     const start = requestStart.get(requestId);
     requestStart.delete(requestId);
     const ruleId = requestRule.get(requestId);
@@ -269,14 +291,16 @@ import { matcherMatches } from '../shared/match';
       ruleId,
     };
 
+    dbg('capture → bridge', { id: cap.id, status: cap.response.status, mocked: cap.mocked, url: request.url });
     postToBridge({ kind: 'moxy:capture', capture: cap });
   });
 
   interceptor.on('unhandledException', ({ error, request }) => {
-    console.debug('[moxy] unhandled exception in', request.method, request.url, error);
+    dbg('unhandled exception', request.method, request.url, error);
   });
 
   interceptor.apply();
+  dbg('interceptors applied');
 
   console.log('[moxy] interceptors applied (fetch + XHR via @mswjs/interceptors)');
 })();

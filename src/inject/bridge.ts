@@ -2,6 +2,9 @@
 // Relays messages between MAIN-world patch.ts and the service worker.
 
 import { MOXY_MARKER, type FromMainMessage, type ToMainMessage, type SwResponse } from '../shared/types';
+import { createDebug } from '../shared/debug';
+
+const dbg = createDebug('bridge');
 
 (() => {
   // Idempotency guard. Re-injection via chrome.scripting.executeScript (used by
@@ -9,17 +12,21 @@ import { MOXY_MARKER, type FromMainMessage, type ToMainMessage, type SwResponse 
   // a duplicate set of listeners, double-emit capture forwards, and leak a stale
   // nonce. The flag lives on globalThis so it survives bundler IIFE wrapping.
   const g = globalThis as typeof globalThis & { __moxy_bridge_installed?: boolean };
-  if (g.__moxy_bridge_installed) return;
+  if (g.__moxy_bridge_installed) {
+    dbg('install skipped (already installed)');
+    return;
+  }
   g.__moxy_bridge_installed = true;
 
   const nonce = crypto.randomUUID();
+  dbg('install', { nonce, url: location.href });
 
   function postToMain(msg: ToMainMessage) {
     window.postMessage({ __moxy: MOXY_MARKER, payload: msg }, '*');
   }
 
   // Defensive: when the extension is reloaded during development, content-
-  // script instances already running in open tabs become orphaned. Their
+  // script instances already running in open tabs beco me orphaned. Their
   // `chrome.runtime` reference becomes undefined (or accessing it throws
   // "Extension context invalidated"). We can't recover those instances —
   // the new injected bridge supersedes them — but we must not throw an
@@ -41,11 +48,13 @@ import { MOXY_MARKER, type FromMainMessage, type ToMainMessage, type SwResponse 
     // Bail without installing listeners. This instance is in an invalidated
     // context (extension reload during page lifetime); the new injection has
     // already installed a working bridge.
+    dbg('install aborted (runtime invalidated)');
     return;
   }
 
   // Send the nonce as soon as the page is alive. patch.ts runs first
   // (document_start, MAIN world), but it buffers calls until it gets the nonce.
+  dbg('nonce → main');
   postToMain({ kind: 'moxy:nonce', nonce });
 
   // Listen for messages from MAIN.
@@ -58,18 +67,29 @@ import { MOXY_MARKER, type FromMainMessage, type ToMainMessage, type SwResponse 
 
     // Validate handshake from MAIN: it must echo our nonce.
     if (payload.kind === 'moxy:handshake') {
-      if (payload.nonce !== nonce) return;
+      if (payload.nonce !== nonce) {
+        dbg('handshake dropped (nonce mismatch)');
+        return;
+      }
+      dbg('handshake ok → requesting rules');
       void requestRules();
       return;
     }
 
     if (payload.kind === 'moxy:capture') {
       const rt = safeRuntime();
-      if (!rt) return;
+      if (!rt) {
+        dbg('capture dropped (runtime invalidated)', payload.capture.id);
+        return;
+      }
+      dbg('capture → sw', { id: payload.capture.id, url: payload.capture.request.url });
       try {
-        rt.sendMessage({ kind: 'sw:capture', capture: payload.capture }).catch(() => {});
-      } catch {
+        rt.sendMessage({ kind: 'sw:capture', capture: payload.capture })
+          .then((res) => dbg('sw:capture resolved', res))
+          .catch((e) => dbg('sw:capture rejected', e));
+      } catch (e) {
         // Context invalidated mid-send; drop quietly.
+        dbg('sw:capture threw sync', e);
       }
       return;
     }
@@ -78,17 +98,21 @@ import { MOXY_MARKER, type FromMainMessage, type ToMainMessage, type SwResponse 
   async function requestRules() {
     const rt = safeRuntime();
     if (!rt) {
+      dbg('requestRules: runtime invalidated → empty rules');
       postToMain({ kind: 'moxy:rules', rules: [], nonce });
       return;
     }
     try {
       const res = (await rt.sendMessage({ kind: 'sw:get-rules-for-tab' })) as SwResponse;
       if (res?.ok && res.data) {
+        dbg('rules from sw', { count: (res.data as unknown[]).length });
         postToMain({ kind: 'moxy:rules', rules: res.data as never, nonce });
       } else {
+        dbg('rules from sw: empty', res);
         postToMain({ kind: 'moxy:rules', rules: [], nonce });
       }
-    } catch {
+    } catch (e) {
+      dbg('rules from sw: threw', e);
       postToMain({ kind: 'moxy:rules', rules: [], nonce });
     }
   }
@@ -98,10 +122,12 @@ import { MOXY_MARKER, type FromMainMessage, type ToMainMessage, type SwResponse 
   try {
     safeRuntime()?.onMessage.addListener((msg) => {
       if (msg?.kind === 'broadcast:rules-updated') {
+        dbg('broadcast:rules-updated → re-requesting rules');
         void requestRules();
       }
     });
-  } catch {
+  } catch (e) {
     // Listener registration on invalidated context throws; nothing to do.
+    dbg('runtime.onMessage register threw', e);
   }
 })();

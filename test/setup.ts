@@ -52,6 +52,12 @@ const chromeStub = {
     local: {
       get: vi.fn().mockResolvedValue({}),
       set: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
+    },
+    session: {
+      get: vi.fn().mockResolvedValue({}),
+      set: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
     },
   },
   scripting: {

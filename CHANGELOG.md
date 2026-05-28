@@ -2,7 +2,13 @@
 
 All notable changes to moxy are documented here. Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
-## v1.3.1 — 2026-05-22
+## v1.3.2 — 2026-05-28
+
+### Fixed
+- **Captures stop appearing after the extension has been running a while.** Captures used to live in `chrome.storage.local`, which has a 10 MB hard quota across all keys. Once a long-lived browser session accumulated enough captures, every new `storage.local.set` failed with `Resource::kQuotaBytes quota exceeded`, breaking not just capture storage but every other write that shared the namespace. New captures silently disappeared; the panel showed an empty list for the affected origin even though `interceptor.on('response')` was firing. Captures now live in `chrome.storage.session` — auto-cleared on browser restart, isolated from rule + scenario storage, and they're inherently ephemeral anyway. On boot the legacy `moxy:captures` blob is purged from `.local` so existing users immediately reclaim that quota.
+
+### Added
+- **Opt-in debug logging across the whole message bus.** A new `src/shared/debug.ts` exposes `createDebug(prefix)`, gating logs behind `localStorage.moxy:debug === '1'` in page contexts (patch, bridge, devtools panel, side panel) and `globalThis.MOXY_DEBUG = true` in the SW. Instrumented every meaningful hop: patch lifecycle + nonce handshake + per-request rule-match decisions + response → bridge handoff, bridge install + nonce-out + capture-forward (replacing the silent `.catch` with explicit `.then`/`.catch` traces) + rules round-trip, SW boot phases + every `recv`/`reply`/`threw`/`notifyPanel`/`broadcastRulesToTab` + capture-store result, both panels' `send`/`recv` (including the DevTools panel's `tabId` filter drops with the actual mismatched IDs). Off by default — zero noise unless you flip the flag in the surface you want logs from.
 
 ### Changed
 - **Auto-created scenario names now come from the inspected page.** The first rule you save in a tab with no active scenario creates an ephemeral scenario named `{pageTitle} — {hostname}` (e.g. `GitHub — github.com`) instead of `Untitled (DevTools) — tab 1111726977`. Falls back to hostname, then title, then `Untitled scenario` when nothing's available.

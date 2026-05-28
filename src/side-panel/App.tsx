@@ -1,13 +1,20 @@
 import { useEffect, useState, useCallback } from 'preact/hooks';
 import type { RosterRow, SwResponse } from '../shared/types';
+import { createDebug } from '../shared/debug';
 import { ActiveTabsRoster } from './ActiveTabsRoster';
 
+const dbg = createDebug('side');
+
 async function send<T = unknown>(msg: unknown): Promise<T | null> {
+  const kind = (msg as { kind?: string })?.kind;
+  dbg('send', kind);
   try {
     const res = (await chrome.runtime.sendMessage(msg)) as SwResponse;
+    dbg('send reply', kind, res);
     if (res?.ok) return (res.data ?? null) as T | null;
     return null;
-  } catch {
+  } catch (e) {
+    dbg('send threw', kind, e);
     return null;
   }
 }
@@ -37,6 +44,7 @@ export function SidePanelApp() {
   useEffect(() => {
     const listener = (msg: { kind?: string; enabled?: boolean }) => {
       if (!msg?.kind) return;
+      dbg('recv', msg.kind);
       if (
         msg.kind === 'panel:active-changed' ||
         msg.kind === 'panel:permissions-changed' ||
