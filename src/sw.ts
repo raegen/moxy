@@ -40,6 +40,7 @@ const PATCH_SCRIPT_ID = 'moxy-patch';
 const BRIDGE_SCRIPT_ID = 'moxy-bridge';
 const STORAGE_KEY_CAPTURES = 'moxy:captures';
 const STORAGE_KEY_GLOBAL_ENABLED = 'moxy:enabled';
+const STORAGE_KEY_PRESERVE_LOG = 'moxy:preserveLog';
 const CAPTURE_BUFFER_LIMIT_PER_TAB = 500;
 
 const storageAdapter = chromeStorageAdapter();
@@ -372,6 +373,28 @@ async function saveGlobalEnabled(enabled: boolean): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEY_GLOBAL_ENABLED]: enabled });
 }
 
+// "Preserve log" mirrors DevTools Network panel semantics. Off (default) means
+// captures clear on every full document load (signaled by bridge.ts install);
+// on means captures persist across reloads + navigations until the user clears
+// manually or closes the tab. Stored in .local (tiny boolean, fine for quota)
+// rather than .session so the preference survives browser restarts.
+async function loadPreserveLog(): Promise<boolean> {
+  const obj = await chrome.storage.local.get(STORAGE_KEY_PRESERVE_LOG);
+  return (obj[STORAGE_KEY_PRESERVE_LOG] as boolean | undefined) ?? false;
+}
+
+async function savePreserveLog(enabled: boolean): Promise<void> {
+  await chrome.storage.local.set({ [STORAGE_KEY_PRESERVE_LOG]: enabled });
+}
+
+async function clearCapturesForTab(tabId: number): Promise<void> {
+  await withWriteLock(STORAGE_KEY_CAPTURES, async () => {
+    const caps = await loadCaptures();
+    const remaining = caps.filter((c) => c.tabId !== tabId);
+    if (remaining.length !== caps.length) await saveCaptures(remaining);
+  });
+}
+
 async function appendCapture(cap: Capture): Promise<void> {
   await withWriteLock(STORAGE_KEY_CAPTURES, async () => {
     const all = await loadCaptures();
@@ -483,6 +506,33 @@ async function handleMessage(
       });
       await broadcastRulesToAllTabs();
       notifyPanel({ kind: 'panel:global-toggled', enabled: msg.enabled });
+      return { ok: true };
+    }
+    case 'sw:get-preserve-log': {
+      return { ok: true, data: await loadPreserveLog() };
+    }
+    case 'sw:set-preserve-log': {
+      await withWriteLock(STORAGE_KEY_PRESERVE_LOG, async () => {
+        await savePreserveLog(msg.enabled);
+      });
+      notifyPanel({ kind: 'panel:preserve-log-changed', enabled: msg.enabled });
+      return { ok: true };
+    }
+    case 'sw:new-document': {
+      // bridge.ts fires this at document_start of every fresh page load. If
+      // "Preserve log" is off (default), clear the tab's captures so the
+      // panel doesn't show stale data from the previous document. SPA route
+      // changes don't re-run content scripts, so this never fires for
+      // in-document navigations — captures persist across them naturally.
+      if (senderTabId == null) return { ok: true };
+      const preserve = await loadPreserveLog();
+      if (preserve) {
+        dbg('sw:new-document: preserveLog on — keeping captures for tab', senderTabId);
+        return { ok: true };
+      }
+      await clearCapturesForTab(senderTabId);
+      dbg('sw:new-document: cleared captures for tab', senderTabId);
+      notifyPanel({ kind: 'panel:captures-cleared', tabId: senderTabId });
       return { ok: true };
     }
 

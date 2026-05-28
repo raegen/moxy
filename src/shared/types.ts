@@ -133,6 +133,9 @@ export type SwMessage =
   | { kind: 'sw:clear-captures'; tabId?: number }
   | { kind: 'sw:get-global-enabled' }
   | { kind: 'sw:set-global-enabled'; enabled: boolean }
+  | { kind: 'sw:get-preserve-log' }
+  | { kind: 'sw:set-preserve-log'; enabled: boolean }
+  | { kind: 'sw:new-document' }
   // Scenario CRUD (v1.1b)
   | { kind: 'sw:list-scenarios' }
   | { kind: 'sw:save-scenario'; scenario: Scenario }
@@ -161,5 +164,5 @@ export type SwResponse =
 
 export const MOXY_MARKER = '__moxy_v1__';
 export const MOXY_FORMAT_VERSION = 1 as const;
-export const MOXY_EXTENSION_VERSION = '1.3.2';
+export const MOXY_EXTENSION_VERSION = '1.3.3';
 export const SCHEMA_URL = 'https://raw.githubusercontent.com/raegen/moxy/v1.1.0/schema/v1.json';

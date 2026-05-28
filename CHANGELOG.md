@@ -2,7 +2,11 @@
 
 All notable changes to moxy are documented here. Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
-## v1.3.2 — 2026-05-28
+## v1.3.3 — 2026-05-28
+
+### Changed
+- **Captures now clear on full page loads, matching DevTools Network panel.** Previously captures persisted across navigations within a browser session — useful as a debugging history, but meant stale entries from a previous page polluted the current view. Captures now wipe on every full document load (reload, link click, typed URL). SPA route changes (History API, hash fragments) don't reload content scripts, so they leave captures alone — exactly what you want when debugging single-page apps.
+- **Added a `Preserve log` checkbox to the captures toolbar.** Tick it to keep captures across reloads + navigations (same semantics as Chrome DevTools' Preserve log). Off by default. The toolbar is now visible even when the capture list is empty, so you can flip the toggle before triggering the request you want to capture. State persists across browser restarts.
 
 ### Fixed
 - **Captures stop appearing after the extension has been running a while.** Captures used to live in `chrome.storage.local`, which has a 10 MB hard quota across all keys. Once a long-lived browser session accumulated enough captures, every new `storage.local.set` failed with `Resource::kQuotaBytes quota exceeded`, breaking not just capture storage but every other write that shared the namespace. New captures silently disappeared; the panel showed an empty list for the affected origin even though `interceptor.on('response')` was firing. Captures now live in `chrome.storage.session` — auto-cleared on browser restart, isolated from rule + scenario storage, and they're inherently ephemeral anyway. On boot the legacy `moxy:captures` blob is purged from `.local` so existing users immediately reclaim that quota.

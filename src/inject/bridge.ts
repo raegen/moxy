@@ -52,6 +52,21 @@ const dbg = createDebug('bridge');
     return;
   }
 
+  // Tell the SW a fresh document just loaded. The SW uses this to clear
+  // stale captures for the tab when "Preserve log" is off (DevTools Network
+  // panel semantics). Fired once per bridge install — the install guard above
+  // means executeScript-driven re-injection on the same document is a no-op,
+  // and SPA route changes don't re-run content scripts at all, so this only
+  // fires for actual full document loads.
+  try {
+    safeRuntime()
+      ?.sendMessage({ kind: 'sw:new-document' })
+      .then((res) => dbg('sw:new-document resolved', res))
+      .catch((e) => dbg('sw:new-document rejected', e));
+  } catch (e) {
+    dbg('sw:new-document threw sync', e);
+  }
+
   // Send the nonce as soon as the page is alive. patch.ts runs first
   // (document_start, MAIN world), but it buffers calls until it gets the nonce.
   dbg('nonce → main');

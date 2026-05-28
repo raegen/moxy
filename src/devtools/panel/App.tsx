@@ -47,24 +47,27 @@ export function App() {
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [activeScenarioId, setActiveScenarioId] = useState<string | null>(null);
   const [globalEnabled, setGlobalEnabled] = useState<boolean>(true);
+  const [preserveLog, setPreserveLog] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<Tab>('captures');
   const [selectedCapture, setSelectedCapture] = useState<Capture | null>(null);
   const [editingRule, setEditingRule] = useState<Rule | null>(null);
 
   const refresh = useCallback(async (tid: number | null) => {
     if (tid == null) return;
-    const [caps, rls, ge, sc, ac] = await Promise.all([
+    const [caps, rls, ge, sc, ac, pl] = await Promise.all([
       send<Capture[]>({ kind: 'sw:list-captures', tabId: tid }),
       send<Rule[]>({ kind: 'sw:list-rules', tabId: tid }),
       send<boolean>({ kind: 'sw:get-global-enabled' }),
       send<Scenario[]>({ kind: 'sw:list-scenarios' }),
       send<{ scenarioId: string | null }>({ kind: 'sw:get-active-scenario', tabId: tid }),
+      send<boolean>({ kind: 'sw:get-preserve-log' }),
     ]);
     setCaptures(caps ?? []);
     setRules(rls ?? []);
     if (ge != null) setGlobalEnabled(ge);
     setScenarios(sc ?? []);
     setActiveScenarioId(ac?.scenarioId ?? null);
+    if (pl != null) setPreserveLog(pl);
   }, []);
 
   // Re-fetch whenever the host changes the current tab. The side-panel host
@@ -98,6 +101,8 @@ export function App() {
         void refresh(tabId);
       } else if (msg.kind === 'panel:global-toggled') {
         if (typeof msg.enabled === 'boolean') setGlobalEnabled(msg.enabled);
+      } else if (msg.kind === 'panel:preserve-log-changed') {
+        if (typeof msg.enabled === 'boolean') setPreserveLog(msg.enabled);
       } else if (msg.kind === 'panel:scenarios-updated' || msg.kind === 'panel:active-changed') {
         void refresh(tabId);
       }
@@ -121,6 +126,12 @@ export function App() {
     const next = !globalEnabled;
     setGlobalEnabled(next);
     await send({ kind: 'sw:set-global-enabled', enabled: next });
+  };
+
+  const togglePreserveLog = async () => {
+    const next = !preserveLog;
+    setPreserveLog(next);
+    await send({ kind: 'sw:set-preserve-log', enabled: next });
   };
 
   const enabledRulesCount = rules.filter((r) => r.enabled).length;
@@ -198,23 +209,34 @@ export function App() {
       </nav>
 
       <main class="moxy-body">
-        {activeTab === 'captures' &&
-          (captures.length === 0 ? (
-            <div class="empty">
-              No captures yet.
-              <br />
-              Open a page that uses fetch, then reload that page.
+        {activeTab === 'captures' && (
+          <>
+            <div class="capture-toolbar">
+              <span class="capture-toolbar-count">
+                {captures.length} capture{captures.length === 1 ? '' : 's'}
+              </span>
+              <label
+                class="preserve-log-toggle"
+                title="Keep captures across page reloads + navigations (DevTools 'Preserve log' semantics)"
+              >
+                <input
+                  type="checkbox"
+                  checked={preserveLog}
+                  onChange={() => void togglePreserveLog()}
+                />
+                <span>Preserve log</span>
+              </label>
+              <button class="btn-sm" onClick={clear} disabled={captures.length === 0}>
+                clear
+              </button>
             </div>
-          ) : (
-            <>
-              <div class="capture-toolbar">
-                <span class="capture-toolbar-count">
-                  {captures.length} capture{captures.length === 1 ? '' : 's'}
-                </span>
-                <button class="btn-sm" onClick={clear}>
-                  clear
-                </button>
+            {captures.length === 0 ? (
+              <div class="empty">
+                No captures yet.
+                <br />
+                Open a page that uses fetch, then reload that page.
               </div>
+            ) : (
               <ul class="capture-list">
                 {captures
                   .slice()
@@ -242,8 +264,9 @@ export function App() {
                     </li>
                   ))}
               </ul>
-            </>
-          ))}
+            )}
+          </>
+        )}
 
         {activeTab === 'rules' &&
           (rules.length === 0 ? (

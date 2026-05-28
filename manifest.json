@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "moxy",
   "short_name": "moxy",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "Mock HTTP responses from your browser. Override status codes, bodies, headers, latency. Share scenarios as files.",
   "author": "raegen",
   "homepage_url": "https://github.com/raegen/moxy",
