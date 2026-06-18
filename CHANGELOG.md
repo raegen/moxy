@@ -2,7 +2,10 @@
 
 All notable changes to moxy are documented here. Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
-## v1.3.3 — 2026-05-28
+## v1.3.4 — 2026-05-28
+
+### Fixed
+- **Captures stop appearing mid-load when session storage fills up.** v1.3.2 moved captures off `chrome.storage.local`'s 10 MB cap onto `.session`, but `.session` has the same 10 MB cap shared across every key. A long-lived browser window with several active tabs (or one very chatty page) blows it, every subsequent `storage.session.set` rejects with `Session storage quota bytes exceeded`, and only the captures stored before the cap survive. `saveCaptures` now reacts to the quota error by evicting the oldest captures (FIFO across all tabs — fairest for a shared cap) and retrying until it fits. Bodies stay untouched, because the full body is what users need to author rules from.
 
 ### Changed
 - **Captures now clear on full page loads, matching DevTools Network panel.** Previously captures persisted across navigations within a browser session — useful as a debugging history, but meant stale entries from a previous page polluted the current view. Captures now wipe on every full document load (reload, link click, typed URL). SPA route changes (History API, hash fragments) don't reload content scripts, so they leave captures alone — exactly what you want when debugging single-page apps.

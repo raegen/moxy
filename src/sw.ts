@@ -360,8 +360,36 @@ async function loadCaptures(): Promise<Capture[]> {
   return (obj[STORAGE_KEY_CAPTURES] as Capture[] | undefined) ?? [];
 }
 
+// chrome.storage.session has a 10MB cap shared across ALL keys, and our
+// captures key holds entries from every open tab. A single big response (or
+// many medium ones accumulated across tabs) blows the cap and every
+// subsequent set() rejects with "Session storage quota bytes exceeded" —
+// captures stop appearing in the panel mid-flight. Recover by evicting
+// oldest captures (FIFO, across all tabs) and retrying until it fits.
+// Truncating bodies would be the alternative, but full bodies are the
+// material users need to author rules from, so the fix has to be eviction.
 async function saveCaptures(captures: Capture[]): Promise<void> {
-  await chrome.storage.session.set({ [STORAGE_KEY_CAPTURES]: captures });
+  let trimmed = captures;
+  let evicted = 0;
+  while (trimmed.length > 0) {
+    try {
+      await chrome.storage.session.set({ [STORAGE_KEY_CAPTURES]: trimmed });
+      if (evicted > 0) dbg('saveCaptures: evicted', evicted, 'oldest captures to fit quota');
+      return;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/quota/i.test(msg)) throw e;
+      // Drop 10% (min 1) of the OLDEST entries — list is already ts-sorted
+      // ascending by appendCapture. Cross-tab eviction is intentional: the
+      // quota is global, so the fairest signal is "what's stalest overall".
+      const dropCount = Math.max(1, Math.floor(trimmed.length * 0.1));
+      trimmed = trimmed.slice(dropCount);
+      evicted += dropCount;
+    }
+  }
+  // Even an empty array threw — should be impossible, but log so the failure
+  // is visible instead of silent. The new capture is lost.
+  console.warn('[moxy] saveCaptures: dropped new capture — body exceeds session storage quota on its own');
 }
 
 async function loadGlobalEnabled(): Promise<boolean> {
