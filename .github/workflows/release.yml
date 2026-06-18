@@ -1,0 +1,93 @@
+name: release
+
+# Triggers on every push to main that touches package.json. Most pushes don't,
+# so the workflow doesn't burn minutes on commits that won't ship a release.
+# When it does run, it reads package.json's version, skips if a release with
+# that tag already exists (idempotent re-runs), otherwise builds the
+# extension, zips dist/, extracts the matching CHANGELOG section as release
+# notes, and publishes a GitHub Release with the zip attached.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'package.json'
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Read version from package.json
+        id: version
+        run: |
+          VERSION=$(jq -r .version package.json)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building moxy v$VERSION"
+
+      - name: Check if release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.version.outputs.tag }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release ${{ steps.version.outputs.tag }} already exists — skipping."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        if: steps.check.outputs.exists == 'false'
+        run: bun install --frozen-lockfile
+
+      - name: Build extension
+        if: steps.check.outputs.exists == 'false'
+        run: bun run build
+
+      - name: Zip dist/ as Chrome Web Store package
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          # Manifest at the root of the archive — what Chrome expects for
+          # `chrome://extensions` "Load unpacked" and what the Web Store
+          # submission accepts.
+          cd dist
+          zip -r "../moxy-${{ steps.version.outputs.tag }}.zip" .
+          cd ..
+          ls -lh "moxy-${{ steps.version.outputs.tag }}.zip"
+
+      - name: Extract release notes from CHANGELOG
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          # Pull the section between "## vX.Y.Z" and the next "## vA.B.C" (or EOF).
+          # Falls back to a one-liner if no matching section is found.
+          awk -v v="${{ steps.version.outputs.version }}" '
+            $0 ~ "^## v" v "( |$)" { found=1; next }
+            found && /^## v/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No CHANGELOG section for v${{ steps.version.outputs.version }} — falling back to generic notes."
+            echo "Release ${{ steps.version.outputs.tag }} (see [CHANGELOG.md](./CHANGELOG.md))." > release-notes.md
+          fi
+          cat release-notes.md
+
+      - name: Create GitHub Release with extension zip
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --notes-file release-notes.md \
+            "moxy-${{ steps.version.outputs.tag }}.zip"

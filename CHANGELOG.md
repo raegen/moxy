@@ -7,18 +7,26 @@ All notable changes to moxy are documented here. Format roughly follows [Keep a 
 ### Changed
 - **Captures moved off `chrome.storage` entirely, into IndexedDB.** v1.3.2 → v1.3.4 chased the symptom — first hopping from `.local` to `.session`, then adding FIFO eviction when `.session` filled up too. Both storage namespaces share a 10 MB cap across every key, which is structurally the wrong fit: multiple active tabs contend for one tiny pool, captures vanish under pressure, and rules/scenarios/preferences sit in the same namespace fighting for the same bytes. IndexedDB's per-origin quota is browser-managed (hundreds of MB to GB, scaled to free disk), survives SW sleep, and supports `tabId`-indexed reads so the SW no longer loads the entire captures array on every write. The 500-per-tab cap stays as a sanity bound; the eviction-on-quota loop and the per-write `withWriteLock(captures)` serialization are both gone — IndexedDB handles transactional ordering itself. On boot the SW also purges the legacy `moxy:captures` blob from BOTH `chrome.storage.local` and `chrome.storage.session` so existing users immediately reclaim quota in those namespaces for the keys that still live there (rules, scenarios, global enabled, preserve-log).
 
+## v1.3.4 — 2026-05-28
+
 ### Fixed
 - **Captures stop appearing mid-load when session storage fills up.** v1.3.2 moved captures off `chrome.storage.local`'s 10 MB cap onto `.session`, but `.session` has the same 10 MB cap shared across every key. A long-lived browser window with several active tabs (or one very chatty page) blows it, every subsequent `storage.session.set` rejects with `Session storage quota bytes exceeded`, and only the captures stored before the cap survive. `saveCaptures` now reacts to the quota error by evicting the oldest captures (FIFO across all tabs — fairest for a shared cap) and retrying until it fits. Bodies stay untouched, because the full body is what users need to author rules from.
+
+## v1.3.3 — 2026-05-28
 
 ### Changed
 - **Captures now clear on full page loads, matching DevTools Network panel.** Previously captures persisted across navigations within a browser session — useful as a debugging history, but meant stale entries from a previous page polluted the current view. Captures now wipe on every full document load (reload, link click, typed URL). SPA route changes (History API, hash fragments) don't reload content scripts, so they leave captures alone — exactly what you want when debugging single-page apps.
 - **Added a `Preserve log` checkbox to the captures toolbar.** Tick it to keep captures across reloads + navigations (same semantics as Chrome DevTools' Preserve log). Off by default. The toolbar is now visible even when the capture list is empty, so you can flip the toggle before triggering the request you want to capture. State persists across browser restarts.
+
+## v1.3.2 — 2026-05-28
 
 ### Fixed
 - **Captures stop appearing after the extension has been running a while.** Captures used to live in `chrome.storage.local`, which has a 10 MB hard quota across all keys. Once a long-lived browser session accumulated enough captures, every new `storage.local.set` failed with `Resource::kQuotaBytes quota exceeded`, breaking not just capture storage but every other write that shared the namespace. New captures silently disappeared; the panel showed an empty list for the affected origin even though `interceptor.on('response')` was firing. Captures now live in `chrome.storage.session` — auto-cleared on browser restart, isolated from rule + scenario storage, and they're inherently ephemeral anyway. On boot the legacy `moxy:captures` blob is purged from `.local` so existing users immediately reclaim that quota.
 
 ### Added
 - **Opt-in debug logging across the whole message bus.** A new `src/shared/debug.ts` exposes `createDebug(prefix)`, gating logs behind `localStorage.moxy:debug === '1'` in page contexts (patch, bridge, devtools panel, side panel) and `globalThis.MOXY_DEBUG = true` in the SW. Instrumented every meaningful hop: patch lifecycle + nonce handshake + per-request rule-match decisions + response → bridge handoff, bridge install + nonce-out + capture-forward (replacing the silent `.catch` with explicit `.then`/`.catch` traces) + rules round-trip, SW boot phases + every `recv`/`reply`/`threw`/`notifyPanel`/`broadcastRulesToTab` + capture-store result, both panels' `send`/`recv` (including the DevTools panel's `tabId` filter drops with the actual mismatched IDs). Off by default — zero noise unless you flip the flag in the surface you want logs from.
+
+## v1.3.1 — 2026-05-22
 
 ### Changed
 - **Auto-created scenario names now come from the inspected page.** The first rule you save in a tab with no active scenario creates an ephemeral scenario named `{pageTitle} — {hostname}` (e.g. `GitHub — github.com`) instead of `Untitled (DevTools) — tab 1111726977`. Falls back to hostname, then title, then `Untitled scenario` when nothing's available.
