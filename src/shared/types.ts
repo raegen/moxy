@@ -164,5 +164,5 @@ export type SwResponse =
 
 export const MOXY_MARKER = '__moxy_v1__';
 export const MOXY_FORMAT_VERSION = 1 as const;
-export const MOXY_EXTENSION_VERSION = '1.3.4';
+export const MOXY_EXTENSION_VERSION = '1.3.5';
 export const SCHEMA_URL = 'https://raw.githubusercontent.com/raegen/moxy/v1.1.0/schema/v1.json';

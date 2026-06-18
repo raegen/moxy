@@ -2,7 +2,10 @@
 
 All notable changes to moxy are documented here. Format roughly follows [Keep a Changelog](https://keepachangelog.com/).
 
-## v1.3.4 — 2026-05-28
+## v1.3.5 — 2026-05-28
+
+### Changed
+- **Captures moved off `chrome.storage` entirely, into IndexedDB.** v1.3.2 → v1.3.4 chased the symptom — first hopping from `.local` to `.session`, then adding FIFO eviction when `.session` filled up too. Both storage namespaces share a 10 MB cap across every key, which is structurally the wrong fit: multiple active tabs contend for one tiny pool, captures vanish under pressure, and rules/scenarios/preferences sit in the same namespace fighting for the same bytes. IndexedDB's per-origin quota is browser-managed (hundreds of MB to GB, scaled to free disk), survives SW sleep, and supports `tabId`-indexed reads so the SW no longer loads the entire captures array on every write. The 500-per-tab cap stays as a sanity bound; the eviction-on-quota loop and the per-write `withWriteLock(captures)` serialization are both gone — IndexedDB handles transactional ordering itself. On boot the SW also purges the legacy `moxy:captures` blob from BOTH `chrome.storage.local` and `chrome.storage.session` so existing users immediately reclaim quota in those namespaces for the keys that still live there (rules, scenarios, global enabled, preserve-log).
 
 ### Fixed
 - **Captures stop appearing mid-load when session storage fills up.** v1.3.2 moved captures off `chrome.storage.local`'s 10 MB cap onto `.session`, but `.session` has the same 10 MB cap shared across every key. A long-lived browser window with several active tabs (or one very chatty page) blows it, every subsequent `storage.session.set` rejects with `Session storage quota bytes exceeded`, and only the captures stored before the cap survive. `saveCaptures` now reacts to the quota error by evicting the oldest captures (FIFO across all tabs — fairest for a shared cap) and retrying until it fits. Bodies stay untouched, because the full body is what users need to author rules from.

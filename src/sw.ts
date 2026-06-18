@@ -15,6 +15,13 @@ import type { Capture, RosterRow, Scenario, SwMessage, SwResponse } from './shar
 import { migrateV1ToV11, chromeStorageAdapter } from './shared/migrate';
 import { withWriteLock } from './shared/storage';
 import { createDebug } from './shared/debug';
+import {
+  addCapture as dbAddCapture,
+  listCapturesForTab as dbListCapturesForTab,
+  listAllCaptures as dbListAllCaptures,
+  clearCapturesForTab as dbClearCapturesForTab,
+  clearAllCaptures as dbClearAllCaptures,
+} from './shared/captures-db';
 
 const dbg = createDebug('sw');
 import {
@@ -38,7 +45,7 @@ import {
 
 const PATCH_SCRIPT_ID = 'moxy-patch';
 const BRIDGE_SCRIPT_ID = 'moxy-bridge';
-const STORAGE_KEY_CAPTURES = 'moxy:captures';
+const STORAGE_KEY_LEGACY_CAPTURES = 'moxy:captures';
 const STORAGE_KEY_GLOBAL_ENABLED = 'moxy:enabled';
 const STORAGE_KEY_PRESERVE_LOG = 'moxy:preserveLog';
 const CAPTURE_BUFFER_LIMIT_PER_TAB = 500;
@@ -184,15 +191,22 @@ async function runMigration(): Promise<void> {
   });
 }
 
-// Drop the legacy moxy:captures blob from chrome.storage.local. Pre-v1.3.2
-// stored captures there; v1.3.2 moved them to .session. Existing users would
-// otherwise carry forward a potentially-massive stale value that eats into
-// their .local quota forever (and bricks every other .local write once full).
-async function purgeLegacyCapturesFromLocal(): Promise<void> {
+// Drop the legacy moxy:captures blob from BOTH chrome.storage namespaces.
+// Pre-v1.3.2 stored captures in .local; v1.3.2–v1.3.4 stored them in .session.
+// v1.3.5 moves to IndexedDB (per-origin quota in the hundreds of MB), so the
+// old keys are dead weight that would otherwise keep eating into the shared
+// .local / .session quotas users have for their other moxy state (rules,
+// scenarios, preserve-log preference, the global ON/OFF flag).
+async function purgeLegacyCaptureStorage(): Promise<void> {
   try {
-    await chrome.storage.local.remove(STORAGE_KEY_CAPTURES);
+    await chrome.storage.local.remove(STORAGE_KEY_LEGACY_CAPTURES);
   } catch (e) {
-    console.warn('[moxy] legacy captures purge failed', e);
+    console.warn('[moxy] legacy captures purge from .local failed', e);
+  }
+  try {
+    await chrome.storage.session.remove(STORAGE_KEY_LEGACY_CAPTURES);
+  } catch (e) {
+    console.warn('[moxy] legacy captures purge from .session failed', e);
   }
 }
 
@@ -200,7 +214,7 @@ async function bootSequence(): Promise<void> {
   dbg('boot: migration');
   await runMigration();
   dbg('boot: purge legacy captures');
-  await purgeLegacyCapturesFromLocal();
+  await purgeLegacyCaptureStorage();
   dbg('boot: sync content scripts');
   await syncContentScriptRegistration();
   dbg('boot: inject into existing tabs');
@@ -349,48 +363,12 @@ async function buildRoster(): Promise<RosterRow[]> {
 
 // ---------- captures + global toggle ----------
 
-// Captures live in chrome.storage.session (cleared on browser restart) rather
-// than .local. They're inherently ephemeral — survival across browser sessions
-// was never a feature, just a side effect of using .local — and large bodies
-// from a long-lived session can blow the 10MB QuotaBytes cap, after which
-// every appendCapture rejects with "Resource::kQuotaBytes quota exceeded" and
-// no new captures land for any tab.
-async function loadCaptures(): Promise<Capture[]> {
-  const obj = await chrome.storage.session.get(STORAGE_KEY_CAPTURES);
-  return (obj[STORAGE_KEY_CAPTURES] as Capture[] | undefined) ?? [];
-}
-
-// chrome.storage.session has a 10MB cap shared across ALL keys, and our
-// captures key holds entries from every open tab. A single big response (or
-// many medium ones accumulated across tabs) blows the cap and every
-// subsequent set() rejects with "Session storage quota bytes exceeded" —
-// captures stop appearing in the panel mid-flight. Recover by evicting
-// oldest captures (FIFO, across all tabs) and retrying until it fits.
-// Truncating bodies would be the alternative, but full bodies are the
-// material users need to author rules from, so the fix has to be eviction.
-async function saveCaptures(captures: Capture[]): Promise<void> {
-  let trimmed = captures;
-  let evicted = 0;
-  while (trimmed.length > 0) {
-    try {
-      await chrome.storage.session.set({ [STORAGE_KEY_CAPTURES]: trimmed });
-      if (evicted > 0) dbg('saveCaptures: evicted', evicted, 'oldest captures to fit quota');
-      return;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (!/quota/i.test(msg)) throw e;
-      // Drop 10% (min 1) of the OLDEST entries — list is already ts-sorted
-      // ascending by appendCapture. Cross-tab eviction is intentional: the
-      // quota is global, so the fairest signal is "what's stalest overall".
-      const dropCount = Math.max(1, Math.floor(trimmed.length * 0.1));
-      trimmed = trimmed.slice(dropCount);
-      evicted += dropCount;
-    }
-  }
-  // Even an empty array threw — should be impossible, but log so the failure
-  // is visible instead of silent. The new capture is lost.
-  console.warn('[moxy] saveCaptures: dropped new capture — body exceeds session storage quota on its own');
-}
+// Captures live in IndexedDB (see src/shared/captures-db.ts). chrome.storage's
+// 10 MB cap was structurally the wrong fit: shared across all keys in the
+// namespace, so multiple active tabs would contend for one tiny quota and
+// captures would silently vanish under pressure. IDB's per-origin quota is
+// browser-managed (hundreds of MB to GB), survives SW sleep, and supports
+// queries by tabId without loading the whole array.
 
 async function loadGlobalEnabled(): Promise<boolean> {
   const obj = await chrome.storage.local.get(STORAGE_KEY_GLOBAL_ENABLED);
@@ -415,33 +393,16 @@ async function savePreserveLog(enabled: boolean): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEY_PRESERVE_LOG]: enabled });
 }
 
+// Thin wrappers around the IDB layer. IDB has its own transactional
+// serialization per object store, so the withWriteLock(STORAGE_KEY_CAPTURES)
+// dance that protected the chrome.storage read-modify-write is gone.
 async function clearCapturesForTab(tabId: number): Promise<void> {
-  await withWriteLock(STORAGE_KEY_CAPTURES, async () => {
-    const caps = await loadCaptures();
-    const remaining = caps.filter((c) => c.tabId !== tabId);
-    if (remaining.length !== caps.length) await saveCaptures(remaining);
-  });
+  await dbClearCapturesForTab(tabId);
 }
 
 async function appendCapture(cap: Capture): Promise<void> {
-  await withWriteLock(STORAGE_KEY_CAPTURES, async () => {
-    const all = await loadCaptures();
-    all.push(cap);
-    const byTab = new Map<number, Capture[]>();
-    for (const c of all) {
-      const arr = byTab.get(c.tabId) ?? [];
-      arr.push(c);
-      byTab.set(c.tabId, arr);
-    }
-    const trimmed: Capture[] = [];
-    for (const arr of byTab.values()) {
-      const start = Math.max(0, arr.length - CAPTURE_BUFFER_LIMIT_PER_TAB);
-      for (let i = start; i < arr.length; i++) trimmed.push(arr[i]);
-    }
-    trimmed.sort((a, b) => a.ts - b.ts);
-    await saveCaptures(trimmed);
-    dbg('capture stored', { id: cap.id, tabId: cap.tabId, total: trimmed.length });
-  });
+  await dbAddCapture(cap, CAPTURE_BUFFER_LIMIT_PER_TAB);
+  dbg('capture stored', { id: cap.id, tabId: cap.tabId });
   notifyPanel({ kind: 'panel:capture-added', capture: cap });
 }
 
@@ -473,11 +434,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   await withWriteLock(STORAGE_KEY_ACTIVE, async () => {
     await clearTabFromActive(storageAdapter, tabId);
   });
-  await withWriteLock(STORAGE_KEY_CAPTURES, async () => {
-    const caps = await loadCaptures();
-    const remaining = caps.filter((c) => c.tabId !== tabId);
-    if (remaining.length !== caps.length) await saveCaptures(remaining);
-  });
+  await dbClearCapturesForTab(tabId);
   notifyPanel({ kind: 'panel:tab-closed', tabId });
 });
 
@@ -512,16 +469,14 @@ async function handleMessage(
       return { ok: true };
     }
     case 'sw:list-captures': {
-      const all = await loadCaptures();
-      const filtered = msg.tabId != null ? all.filter((c) => c.tabId === msg.tabId) : all;
-      return { ok: true, data: filtered };
+      const data = msg.tabId != null
+        ? await dbListCapturesForTab(msg.tabId)
+        : await dbListAllCaptures();
+      return { ok: true, data };
     }
     case 'sw:clear-captures': {
-      await withWriteLock(STORAGE_KEY_CAPTURES, async () => {
-        const all = await loadCaptures();
-        const remaining = msg.tabId != null ? all.filter((c) => c.tabId !== msg.tabId) : [];
-        await saveCaptures(remaining);
-      });
+      if (msg.tabId != null) await dbClearCapturesForTab(msg.tabId);
+      else await dbClearAllCaptures();
       notifyPanel({ kind: 'panel:captures-cleared', tabId: msg.tabId });
       return { ok: true };
     }
